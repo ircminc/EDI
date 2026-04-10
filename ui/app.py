@@ -328,6 +328,35 @@ def _render_detail(canonical: CanonicalClaim, result: ValidationResult) -> None:
             _kv("Group Number", c.subscriber.group_number)
             _kv("Payer", c.subscriber.payer_name)
 
+        # Provider section (pay-to, rendering, referring, service facility)
+        def _prov_block(label: str, p) -> None:
+            if p is None:
+                return
+            name = " ".join(filter(None, [p.last_name, p.first_name, p.middle_name])).title()
+            st.markdown(f"**{label}**")
+            _kv("Name", name or "—")
+            _kv("NPI", p.npi)
+            _kv("Taxonomy", p.taxonomy)
+            _kv("Address", " ".join(filter(None, [p.address1, p.address2])))
+            _kv("City / State / ZIP", " ".join(filter(None, [p.city, p.state, p.zip_code])))
+
+        prov_cols = st.columns(2)
+        with prov_cols[0]:
+            _prov_block("Rendering Provider", c.rendering_provider)
+            _prov_block("Referring Provider", c.referring_provider)
+            _prov_block("Supervising Provider", c.supervising_provider)
+        with prov_cols[1]:
+            _prov_block("Service Facility", c.service_facility)
+            _prov_block("Pay-to Provider", c.pay_to_provider)
+            _prov_block("Ordered Provider", c.ordered_provider)
+            _prov_block("Purchased Svc Provider", c.purchased_service_provider)
+
+        # Subscriber address (Batch 2)
+        if any([c.subscriber.address1, c.subscriber.city]):
+            st.markdown("**Subscriber Address**")
+            _kv("Address", " ".join(filter(None, [c.subscriber.address1, c.subscriber.address2])))
+            _kv("City / State / ZIP", " ".join(filter(None, [c.subscriber.city, c.subscriber.state, c.subscriber.zip_code])))
+
         # Diagnosis codes
         if c.diagnosis_codes:
             st.markdown("**Diagnosis Codes**")

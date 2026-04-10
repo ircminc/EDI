@@ -18,6 +18,28 @@ class RawSegment:
 
 
 @dataclass
+class Provider:
+    """
+    Generic provider used for 2010AB (pay-to) and 2310A-E sub-loops.
+    Covers rendering, referring, service facility, ordered, purchased-service.
+    """
+    qualifier: str = ""       # NM101 entity qualifier e.g. "82", "77", "DN"
+    entity_type: str = ""     # NM102: "1" = person, "2" = org
+    last_name: str = ""       # NM103 — org name when entity_type == "2"
+    first_name: str = ""      # NM104
+    middle_name: str = ""     # NM105
+    npi: str = ""             # NM109 when NM108 == "XX"
+    id_qualifier: str = ""    # NM108 (XX = NPI, ZZ = taxonomy, etc.)
+    id_code: str = ""         # NM109 (raw; npi is pre-extracted when XX)
+    taxonomy: str = ""        # PRV segment taxonomy code
+    address1: str = ""        # N3 element 1
+    address2: str = ""        # N3 element 2
+    city: str = ""            # N4 element 1
+    state: str = ""           # N4 element 2
+    zip_code: str = ""        # N4 element 3
+
+
+@dataclass
 class BillingProvider:
     npi: str = ""
     entity_type: str = ""
@@ -30,7 +52,7 @@ class BillingProvider:
     state: str = ""
     zip_code: str = ""
     tax_id: str = ""
-    taxonomy: str = ""          # PRV*PE*ZZ*<taxonomy_code> — provider taxonomy
+    taxonomy: str = ""          # PRV*PE*ZZ*<taxonomy_code>
 
 
 @dataclass
@@ -47,6 +69,11 @@ class Subscriber:
     relationship_code: str = ""
     insurance_type: str = ""            # SBR08
     claim_filing_indicator: str = ""    # SBR09
+    address1: str = ""                  # N3 element 1 (2010BA)
+    address2: str = ""                  # N3 element 2 (2010BA)
+    city: str = ""                      # N4 element 1 (2010BA)
+    state: str = ""                     # N4 element 2 (2010BA)
+    zip_code: str = ""                  # N4 element 3 (2010BA)
 
 
 @dataclass
@@ -57,6 +84,7 @@ class Patient:
     dob: str = ""
     gender: str = ""
     address1: str = ""
+    address2: str = ""        # N3 element 2 (was never captured — fixed)
     city: str = ""
     state: str = ""
     zip_code: str = ""
@@ -89,29 +117,38 @@ class Claim:
     provider_accept_assignment: str = ""
     benefit_assignment: str = ""
     release_info_code: str = ""
-    special_program_indicator: str = ""     # CLM10 — "05"=EPSDT, "09"=CLIA, etc.
+    special_program_indicator: str = ""     # CLM10
     delay_reason_code: str = ""             # CLM11
 
-    # Date of service (DTP*472) — stored as split ISO dates
-    service_date_from: str = ""             # YYYY-MM-DD start (or sole date)
-    service_date_to: str = ""               # YYYY-MM-DD end  (= from for single dates)
+    # Date of service (split ISO dates)
+    service_date_from: str = ""
+    service_date_to: str = ""
 
-    # Named clinical/administrative dates from DTP segments
-    onset_date: str = ""                    # DTP*431 — Onset of Current Illness
-    accident_date: str = ""                 # DTP*439 — Accident Date
+    # Named clinical dates
+    onset_date: str = ""                    # DTP*431
+    accident_date: str = ""                 # DTP*439
 
-    # Reference numbers from REF segments (2300 loop)
+    # Reference numbers
     prior_auth_number: str = ""             # REF*G1
     referral_number: str = ""               # REF*9F
     payer_claim_ctrl_number: str = ""       # REF*F8
     medical_record_number: str = ""         # REF*EA
     patient_control_number: str = ""        # REF*EJ
-    ref_extras: dict = field(default_factory=dict)  # any other REF qualifiers
+    ref_extras: dict = field(default_factory=dict)
 
-    # Diagnosis codes — list of {"qualifier": "BK"|"BF"|..., "code": "J06.9"}
+    # Diagnosis codes: [{"qualifier": "BK"|"BF", "code": "J06.9"}]
     diagnosis_codes: list[dict] = field(default_factory=list)
 
+    # Providers
     billing_provider: BillingProvider = field(default_factory=BillingProvider)
+    pay_to_provider: Optional[Provider] = None          # 2010AB NM1*87
+    rendering_provider: Optional[Provider] = None       # 2310D NM1*82
+    referring_provider: Optional[Provider] = None       # 2310A NM1*DN
+    service_facility: Optional[Provider] = None         # 2310E NM1*77
+    supervising_provider: Optional[Provider] = None     # 2310F NM1*DQ
+    ordered_provider: Optional[Provider] = None         # 2310C NM1*DK
+    purchased_service_provider: Optional[Provider] = None  # 2310B NM1*P3
+
     subscriber: Subscriber = field(default_factory=Subscriber)
     patient: Optional[Patient] = None
     service_lines: list[ServiceLine] = field(default_factory=list)
@@ -137,6 +174,31 @@ class TransactionEnvelope:
     functional_id: str = ""
 
 
+# ---------------------------------------------------------------------------
+# Serialization helper
+# ---------------------------------------------------------------------------
+
+def _provider_dict(p: Optional[Provider]) -> Optional[dict]:
+    if p is None:
+        return None
+    return {
+        "qualifier":    p.qualifier,
+        "entity_type":  p.entity_type,
+        "last_name":    p.last_name,
+        "first_name":   p.first_name,
+        "middle_name":  p.middle_name,
+        "npi":          p.npi,
+        "id_qualifier": p.id_qualifier,
+        "id_code":      p.id_code,
+        "taxonomy":     p.taxonomy,
+        "address1":     p.address1,
+        "address2":     p.address2,
+        "city":         p.city,
+        "state":        p.state,
+        "zip_code":     p.zip_code,
+    }
+
+
 @dataclass
 class CanonicalClaim:
     """Top-level canonical output for one claim."""
@@ -149,104 +211,117 @@ class CanonicalClaim:
         c = self.claim
         return {
             "file": {
-                "file_name": self.file.file_name,
-                "sender_id": self.file.sender_id,
-                "receiver_id": self.file.receiver_id,
+                "file_name":          self.file.file_name,
+                "sender_id":          self.file.sender_id,
+                "receiver_id":        self.file.receiver_id,
                 "isa_control_number": self.file.isa_control_number,
-                "isa_version": self.file.isa_version,
-                "usage_indicator": self.file.usage_indicator,
+                "isa_version":        self.file.isa_version,
+                "usage_indicator":    self.file.usage_indicator,
             },
             "transaction": {
                 "st_control_number": self.transaction.st_control_number,
                 "gs_control_number": self.transaction.gs_control_number,
-                "gs_date": self.transaction.gs_date,
-                "gs_time": self.transaction.gs_time,
-                "functional_id": self.transaction.functional_id,
+                "gs_date":           self.transaction.gs_date,
+                "gs_time":           self.transaction.gs_time,
+                "functional_id":     self.transaction.functional_id,
             },
             "claim": {
-                "claim_id": c.claim_id,
-                "total_charge": c.total_charge,
-                "place_of_service": c.place_of_service,
-                "frequency_code": c.frequency_code,
+                "claim_id":                   c.claim_id,
+                "total_charge":               c.total_charge,
+                "place_of_service":           c.place_of_service,
+                "frequency_code":             c.frequency_code,
                 "provider_accept_assignment": c.provider_accept_assignment,
-                "benefit_assignment": c.benefit_assignment,
-                "release_info_code": c.release_info_code,
-                "special_program_indicator": c.special_program_indicator,
-                "delay_reason_code": c.delay_reason_code,
-                "service_date_from": c.service_date_from,
-                "service_date_to": c.service_date_to,
-                "onset_date": c.onset_date,
-                "accident_date": c.accident_date,
-                "prior_auth_number": c.prior_auth_number,
-                "referral_number": c.referral_number,
-                "payer_claim_ctrl_number": c.payer_claim_ctrl_number,
-                "medical_record_number": c.medical_record_number,
-                "patient_control_number": c.patient_control_number,
-                "ref_extras": c.ref_extras,
-                "diagnosis_codes": c.diagnosis_codes,
+                "benefit_assignment":          c.benefit_assignment,
+                "release_info_code":          c.release_info_code,
+                "special_program_indicator":  c.special_program_indicator,
+                "delay_reason_code":          c.delay_reason_code,
+                "service_date_from":          c.service_date_from,
+                "service_date_to":            c.service_date_to,
+                "onset_date":                 c.onset_date,
+                "accident_date":              c.accident_date,
+                "prior_auth_number":          c.prior_auth_number,
+                "referral_number":            c.referral_number,
+                "payer_claim_ctrl_number":    c.payer_claim_ctrl_number,
+                "medical_record_number":      c.medical_record_number,
+                "patient_control_number":     c.patient_control_number,
+                "ref_extras":                 c.ref_extras,
+                "diagnosis_codes":            c.diagnosis_codes,
                 "billing_provider": {
-                    "npi": c.billing_provider.npi,
+                    "npi":         c.billing_provider.npi,
                     "entity_type": c.billing_provider.entity_type,
-                    "last_name": c.billing_provider.last_name,
-                    "first_name": c.billing_provider.first_name,
-                    "org_name": c.billing_provider.org_name,
-                    "address1": c.billing_provider.address1,
-                    "address2": c.billing_provider.address2,
-                    "city": c.billing_provider.city,
-                    "state": c.billing_provider.state,
-                    "zip_code": c.billing_provider.zip_code,
-                    "tax_id": c.billing_provider.tax_id,
-                    "taxonomy": c.billing_provider.taxonomy,
+                    "last_name":   c.billing_provider.last_name,
+                    "first_name":  c.billing_provider.first_name,
+                    "org_name":    c.billing_provider.org_name,
+                    "address1":    c.billing_provider.address1,
+                    "address2":    c.billing_provider.address2,
+                    "city":        c.billing_provider.city,
+                    "state":       c.billing_provider.state,
+                    "zip_code":    c.billing_provider.zip_code,
+                    "tax_id":      c.billing_provider.tax_id,
+                    "taxonomy":    c.billing_provider.taxonomy,
                 },
+                "pay_to_provider":            _provider_dict(c.pay_to_provider),
+                "rendering_provider":         _provider_dict(c.rendering_provider),
+                "referring_provider":         _provider_dict(c.referring_provider),
+                "service_facility":           _provider_dict(c.service_facility),
+                "supervising_provider":       _provider_dict(c.supervising_provider),
+                "ordered_provider":           _provider_dict(c.ordered_provider),
+                "purchased_service_provider": _provider_dict(c.purchased_service_provider),
                 "subscriber": {
-                    "member_id": c.subscriber.member_id,
-                    "last_name": c.subscriber.last_name,
-                    "first_name": c.subscriber.first_name,
-                    "middle_name": c.subscriber.middle_name,
-                    "dob": c.subscriber.dob,
-                    "gender": c.subscriber.gender,
-                    "group_number": c.subscriber.group_number,
-                    "payer_name": c.subscriber.payer_name,
-                    "payer_id": c.subscriber.payer_id,
-                    "relationship_code": c.subscriber.relationship_code,
-                    "insurance_type": c.subscriber.insurance_type,
+                    "member_id":             c.subscriber.member_id,
+                    "last_name":             c.subscriber.last_name,
+                    "first_name":            c.subscriber.first_name,
+                    "middle_name":           c.subscriber.middle_name,
+                    "dob":                   c.subscriber.dob,
+                    "gender":                c.subscriber.gender,
+                    "group_number":          c.subscriber.group_number,
+                    "payer_name":            c.subscriber.payer_name,
+                    "payer_id":              c.subscriber.payer_id,
+                    "relationship_code":     c.subscriber.relationship_code,
+                    "insurance_type":        c.subscriber.insurance_type,
                     "claim_filing_indicator": c.subscriber.claim_filing_indicator,
+                    "address1":              c.subscriber.address1,
+                    "address2":              c.subscriber.address2,
+                    "city":                  c.subscriber.city,
+                    "state":                 c.subscriber.state,
+                    "zip_code":              c.subscriber.zip_code,
                 },
                 "patient": {
-                    "last_name": c.patient.last_name,
-                    "first_name": c.patient.first_name,
-                    "middle_name": c.patient.middle_name,
-                    "dob": c.patient.dob,
-                    "gender": c.patient.gender,
-                    "address1": c.patient.address1,
-                    "city": c.patient.city,
-                    "state": c.patient.state,
-                    "zip_code": c.patient.zip_code,
+                    "last_name":         c.patient.last_name,
+                    "first_name":        c.patient.first_name,
+                    "middle_name":       c.patient.middle_name,
+                    "dob":               c.patient.dob,
+                    "gender":            c.patient.gender,
+                    "address1":          c.patient.address1,
+                    "address2":          c.patient.address2,
+                    "city":              c.patient.city,
+                    "state":             c.patient.state,
+                    "zip_code":          c.patient.zip_code,
                     "relationship_code": c.patient.relationship_code,
                 } if c.patient else None,
                 "service_lines": [
                     {
-                        "line_number": sl.line_number,
-                        "procedure_code": sl.procedure_code,
-                        "modifier": sl.modifier,
-                        "modifier2": sl.modifier2,
-                        "modifier3": sl.modifier3,
-                        "modifier4": sl.modifier4,
-                        "charge": sl.charge,
-                        "units": sl.units,
-                        "quantity": sl.quantity,
+                        "line_number":       sl.line_number,
+                        "procedure_code":    sl.procedure_code,
+                        "modifier":          sl.modifier,
+                        "modifier2":         sl.modifier2,
+                        "modifier3":         sl.modifier3,
+                        "modifier4":         sl.modifier4,
+                        "charge":            sl.charge,
+                        "units":             sl.units,
+                        "quantity":          sl.quantity,
                         "diagnosis_pointers": sl.diagnosis_pointers,
-                        "date": sl.date,
-                        "place_of_service": sl.place_of_service,
-                        "ndc": sl.ndc,
+                        "date":              sl.date,
+                        "place_of_service":  sl.place_of_service,
+                        "ndc":               sl.ndc,
                     }
                     for sl in c.service_lines
                 ],
                 "raw_segments": [
                     {
-                        "segment": rs.segment,
+                        "segment":  rs.segment,
                         "position": rs.position,
-                        "loop": rs.loop,
+                        "loop":     rs.loop,
                     }
                     for rs in c.raw_segments
                 ],

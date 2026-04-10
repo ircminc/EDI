@@ -10,13 +10,19 @@ Loop detection is segment-sequence driven:
   NM1*40     → 1000B (Receiver)
   HL + code20→ 2000A (Billing Provider HL)
   NM1*85     → 2010AA (Billing Provider Name)
-  NM1*87     → 2010AB (Pay-to-Address)
+  NM1*87     → 2010AB (Pay-to Provider)         [Batch 2: now extracts data]
   HL + code22→ 2000B (Subscriber HL)
-  NM1*IL     → 2010BA (Subscriber Name)
+  NM1*IL     → 2010BA (Subscriber Name)          [Batch 2: N3/N4 now captured]
   NM1*PR     → 2010BB (Payer Name)
   HL + code23→ 2000C (Patient HL)
   NM1*QC     → 2010CA (Patient Name)
   CLM        → 2300 (Claim)
+  NM1*82     → 2310D (Rendering Provider)        [Batch 2: new]
+  NM1*77     → 2310E (Service Facility)          [Batch 2: new]
+  NM1*DN     → 2310A (Referring Provider)        [Batch 2: new]
+  NM1*P3     → 2310B (Purchased Service Prov.)   [Batch 2: new]
+  NM1*DK     → 2310C (Ordered Provider)          [Batch 2: new]
+  NM1*DQ     → 2310F (Supervising Provider)      [Batch 2: new]
   LX         → 2400 (Service Line)
 """
 
@@ -24,7 +30,7 @@ from __future__ import annotations
 
 import logging
 from decimal import Decimal
-from enum import Enum, auto
+from enum import Enum
 from typing import Optional
 
 from .hl_tracker import HLTracker
@@ -34,6 +40,7 @@ from .models import (
     Claim,
     FileEnvelope,
     Patient,
+    Provider,
     RawSegment,
     ServiceLine,
     Subscriber,
@@ -60,21 +67,38 @@ log = logging.getLogger(__name__)
 
 
 class Loop(str, Enum):
-    HEADER = "HEADER"
-    L1000A = "1000A"
-    L1000B = "1000B"
-    L2000A = "2000A"
+    HEADER  = "HEADER"
+    L1000A  = "1000A"
+    L1000B  = "1000B"
+    L2000A  = "2000A"
     L2010AA = "2010AA"
-    L2010AB = "2010AB"
-    L2000B = "2000B"
-    L2010BA = "2010BA"
-    L2010BB = "2010BB"
-    L2000C = "2000C"
-    L2010CA = "2010CA"
-    L2300 = "2300"
-    L2310 = "2310"
-    L2400 = "2400"
+    L2010AB = "2010AB"   # Pay-to Provider
+    L2000B  = "2000B"
+    L2010BA = "2010BA"   # Subscriber Name
+    L2010BB = "2010BB"   # Payer Name
+    L2000C  = "2000C"
+    L2010CA = "2010CA"   # Patient Name
+    L2300   = "2300"
+    L2310A  = "2310A"    # Referring Provider (DN)
+    L2310B  = "2310B"    # Purchased Service Provider (P3)
+    L2310C  = "2310C"    # Ordered Provider (DK)
+    L2310D  = "2310D"    # Rendering Provider (82)
+    L2310E  = "2310E"    # Service Facility (77)
+    L2310F  = "2310F"    # Supervising Provider (DQ)
+    L2310   = "2310"     # Unknown 2310 sub-loop
+    L2400   = "2400"
     UNKNOWN = "UNKNOWN"
+
+
+# Map NM1 qualifier → (loop, Claim attribute name)
+_NM1_PROVIDER_MAP: dict[str, tuple[Loop, str]] = {
+    "82": (Loop.L2310D, "rendering_provider"),
+    "77": (Loop.L2310E, "service_facility"),
+    "DN": (Loop.L2310A, "referring_provider"),
+    "P3": (Loop.L2310B, "purchased_service_provider"),
+    "DK": (Loop.L2310C, "ordered_provider"),
+    "DQ": (Loop.L2310F, "supervising_provider"),
+}
 
 
 class EDI837PStateMachine:
@@ -102,27 +126,30 @@ class EDI837PStateMachine:
         self._loop = Loop.HEADER
         self._hl = HLTracker()
 
-        # Shared across all claims in this ST block
+        # ── Billing-provider context (2000A scope — shared across claims) ──
         self._billing_provider = BillingProvider()
-        self._billing_addr: dict = {}
+        self._pay_to_provider: Optional[Provider] = None   # 2010AB
 
-        # Per-subscriber context
+        # ── Active generic provider pointer ──────────────────────────────
+        # Set whenever we enter 2010AB or any 2310 sub-loop; cleared on
+        # NM1 qualifiers that have their own dedicated handlers.
+        self._active_provider: Optional[Provider] = None
+
+        # ── Per-subscriber context ────────────────────────────────────────
         self._subscriber = Subscriber()
-        self._payer_name = ""
-        self._payer_id = ""
 
-        # Buffered patient data (populated in 2000C before CLM is seen)
+        # ── Buffered patient (2000C data arrives before CLM) ─────────────
         self._pending_patient: Optional[Patient] = None
 
-        # Per-claim context
+        # ── Per-claim context ─────────────────────────────────────────────
         self._current_claim: Optional[Claim] = None
         self._current_lx: int = 0
         self._current_sl: Optional[ServiceLine] = None
 
-        # Output
+        # ── Output ────────────────────────────────────────────────────────
         self._claims: list[CanonicalClaim] = []
 
-        # Parse errors accumulated here (SNIP picks them up separately)
+        # Parse errors accumulated (SNIP picks them up separately)
         self.parse_errors: list[dict] = []
 
     # ------------------------------------------------------------------
@@ -135,30 +162,24 @@ class EDI837PStateMachine:
             seg = seg.strip()
             if not seg:
                 continue
-            # Illegal character check (SNIP L1)
             bad = check_illegal_chars(seg)
             if bad:
                 self.parse_errors.append({
-                    "level": 1,
-                    "severity": "error",
+                    "level": 1, "severity": "error",
                     "code": "L1-ILLEGAL-CHAR",
                     "message": f"Illegal characters {bad!r} in segment.",
-                    "segment": seg[:40],
-                    "position": pos,
+                    "segment": seg[:40], "position": pos,
                 })
 
             els = seg.split(self._ed)
             seg_id = els[0]
             self._dispatch(seg_id, els, seg, pos)
 
-        # Finalize last open claim
         self._finalize_claim()
 
-        # Attach HL tracker errors as parse errors
         for err in self._hl.errors:
             self.parse_errors.append({
-                "level": 2,
-                "severity": "error",
+                "level": 2, "severity": "error",
                 "code": "L2-HL-HIERARCHY",
                 "message": err.message,
                 "segment": err.segment[:40],
@@ -185,28 +206,33 @@ class EDI837PStateMachine:
             node = self._hl.process(raw, ed, pos)
             lc = node.level_code
             if lc == "20":
-                # New billing provider HL — finalize any open claim first
                 self._finalize_claim()
-                self._billing_provider = BillingProvider()
+                self._billing_provider  = BillingProvider()
+                self._pay_to_provider   = None
+                self._active_provider   = None
                 self._loop = Loop.L2000A
             elif lc == "22":
                 self._finalize_claim()
-                self._subscriber = Subscriber()
-                self._pending_patient = None
+                self._subscriber        = Subscriber()
+                self._pending_patient   = None
+                self._active_provider   = None
                 self._loop = Loop.L2000B
             elif lc == "23":
                 self._finalize_claim()
-                # Begin buffering patient data before CLM is seen
-                self._pending_patient = Patient()
+                self._pending_patient   = Patient()
+                self._active_provider   = None
                 self._loop = Loop.L2000C
             else:
                 self._loop = Loop.UNKNOWN
 
         elif seg_id == "PRV":
             data = map_prv(els)
+            taxonomy = data.get("taxonomy_code", "")
             if self._loop == Loop.L2000A:
-                # taxonomy_code is NOT the tax_id — store it in its own field
-                self._billing_provider.taxonomy = data.get("taxonomy_code", "")
+                self._billing_provider.taxonomy = taxonomy
+            elif self._active_provider is not None:
+                # 2310 provider taxonomy (rendering, referring, etc.)
+                self._active_provider.taxonomy = taxonomy
 
         elif seg_id == "NM1":
             self._handle_nm1(els, raw, pos)
@@ -225,9 +251,9 @@ class EDI837PStateMachine:
 
         elif seg_id == "SBR":
             data = map_sbr(els)
-            self._subscriber.relationship_code = data.get("payer_responsibility", "")
-            self._subscriber.group_number = data.get("group_number", "")
-            self._subscriber.insurance_type = data.get("insurance_type", "")
+            self._subscriber.relationship_code     = data.get("payer_responsibility", "")
+            self._subscriber.group_number          = data.get("group_number", "")
+            self._subscriber.insurance_type        = data.get("insurance_type", "")
             self._subscriber.claim_filing_indicator = data.get("claim_filing_indicator", "")
 
         elif seg_id == "DMG":
@@ -257,6 +283,7 @@ class EDI837PStateMachine:
             data = map_lx(els)
             self._current_lx = int(data["line_number"]) if data["line_number"].isdigit() else 0
             self._current_sl = ServiceLine(line_number=self._current_lx)
+            self._active_provider = None   # service-line scope: clear 2310 context
             self._loop = Loop.L2400
             self._record_raw(raw, pos, Loop.L2400)
 
@@ -264,27 +291,24 @@ class EDI837PStateMachine:
             if self._current_sl is not None:
                 data = map_sv1(els, cd)
                 self._current_sl.procedure_code = data["procedure_code"]
-                self._current_sl.modifier  = data["modifier1"]
-                self._current_sl.modifier2 = data["modifier2"]
-                self._current_sl.modifier3 = data["modifier3"]
-                self._current_sl.modifier4 = data["modifier4"]
-                self._current_sl.charge = data["charge"]
-                self._current_sl.units = data["unit_basis"]
-                self._current_sl.quantity = data["quantity"]
+                self._current_sl.modifier       = data["modifier1"]
+                self._current_sl.modifier2      = data["modifier2"]
+                self._current_sl.modifier3      = data["modifier3"]
+                self._current_sl.modifier4      = data["modifier4"]
+                self._current_sl.charge         = data["charge"]
+                self._current_sl.units          = data["unit_basis"]
+                self._current_sl.quantity       = data["quantity"]
                 self._current_sl.diagnosis_pointers = data["diagnosis_pointers"]
                 self._record_raw(raw, pos, Loop.L2400)
 
         elif seg_id == "DTP":
-            data = map_dtp(els)
+            data      = map_dtp(els)
             qualifier = data["qualifier"]
             date_val  = data["date"]
             if self._current_sl is not None and qualifier == "472":
-                # Service-line date of service (2400 loop)
                 self._current_sl.date = date_val
             elif self._current_claim is not None and self._current_sl is None:
-                # Claim-level DTP (2300 context or adjacent 2310 sub-loop)
                 if qualifier == "472":
-                    # Date of service — split range into from/to
                     if " to " in date_val:
                         start, end = date_val.split(" to ", 1)
                         self._current_claim.service_date_from = start.strip()
@@ -299,10 +323,9 @@ class EDI837PStateMachine:
             self._record_raw(raw, pos, self._loop)
 
         elif seg_id in ("SE", "GE", "IEA"):
-            pass  # envelope segments — not part of claim data
+            pass
 
         else:
-            # Generic capture into raw_segments for current claim
             self._record_raw(raw, pos, self._loop)
 
     # ------------------------------------------------------------------
@@ -315,45 +338,88 @@ class EDI837PStateMachine:
 
         if qualifier == "41":
             self._loop = Loop.L1000A
+            self._active_provider = None
+
         elif qualifier == "40":
             self._loop = Loop.L1000B
+            self._active_provider = None
+
         elif qualifier == "85":
             self._loop = Loop.L2010AA
+            self._active_provider = None
             self._billing_provider.entity_type = data["entity_type"]
-            self._billing_provider.last_name = data["last_org_name"]
-            self._billing_provider.first_name = data["first_name"]
-            self._billing_provider.org_name = data["last_org_name"]
-            self._billing_provider.npi = data["id_code"]
+            self._billing_provider.last_name   = data["last_org_name"]
+            self._billing_provider.first_name  = data["first_name"]
+            self._billing_provider.org_name    = data["last_org_name"]
+            self._billing_provider.npi         = data["id_code"]
+
         elif qualifier == "87":
+            # Pay-to Provider (2010AB) — within 2000A scope
             self._loop = Loop.L2010AB
+            prov = Provider(
+                qualifier    = "87",
+                entity_type  = data["entity_type"],
+                last_name    = data["last_org_name"],
+                first_name   = data["first_name"],
+                middle_name  = data["middle_name"],
+                id_qualifier = data["id_qualifier"],
+                id_code      = data["id_code"],
+                npi          = data["id_code"] if data["id_qualifier"] == "XX" else "",
+            )
+            self._pay_to_provider = prov
+            self._active_provider = prov
+
         elif qualifier == "IL":
             self._loop = Loop.L2010BA
-            self._subscriber.last_name = data["last_org_name"]
+            self._active_provider = None
+            self._subscriber.last_name  = data["last_org_name"]
             self._subscriber.first_name = data["first_name"]
             self._subscriber.middle_name = data["middle_name"]
-            self._subscriber.member_id = data["id_code"]
+            self._subscriber.member_id  = data["id_code"]
+
         elif qualifier == "PR":
             self._loop = Loop.L2010BB
+            self._active_provider = None
             self._subscriber.payer_name = data["last_org_name"]
-            self._subscriber.payer_id = data["id_code"]
+            self._subscriber.payer_id   = data["id_code"]
+
         elif qualifier == "QC":
             self._loop = Loop.L2010CA
-            # Patient name may arrive before CLM — write to pending buffer
+            self._active_provider = None
             if self._pending_patient is None:
                 self._pending_patient = Patient()
-            self._pending_patient.last_name = data["last_org_name"]
-            self._pending_patient.first_name = data["first_name"]
+            self._pending_patient.last_name   = data["last_org_name"]
+            self._pending_patient.first_name  = data["first_name"]
             self._pending_patient.middle_name = data["middle_name"]
-            # Also write to current claim if already open
             if self._current_claim is not None:
                 if self._current_claim.patient is None:
                     self._current_claim.patient = self._pending_patient
                 else:
-                    self._current_claim.patient.last_name = data["last_org_name"]
-                    self._current_claim.patient.first_name = data["first_name"]
+                    self._current_claim.patient.last_name   = data["last_org_name"]
+                    self._current_claim.patient.first_name  = data["first_name"]
                     self._current_claim.patient.middle_name = data["middle_name"]
+
+        elif qualifier in _NM1_PROVIDER_MAP:
+            # 2310 sub-loop provider (rendering, referring, service facility, etc.)
+            loop_enum, claim_attr = _NM1_PROVIDER_MAP[qualifier]
+            self._loop = loop_enum
+            prov = Provider(
+                qualifier    = qualifier,
+                entity_type  = data["entity_type"],
+                last_name    = data["last_org_name"],
+                first_name   = data["first_name"],
+                middle_name  = data["middle_name"],
+                id_qualifier = data["id_qualifier"],
+                id_code      = data["id_code"],
+                npi          = data["id_code"] if data["id_qualifier"] == "XX" else "",
+            )
+            self._active_provider = prov
+            if self._current_claim is not None:
+                setattr(self._current_claim, claim_attr, prov)
+
         else:
             self._loop = Loop.L2310
+            self._active_provider = None
 
         self._record_raw(raw, pos, self._loop)
 
@@ -366,62 +432,72 @@ class EDI837PStateMachine:
         data = map_clm(els, self._cd)
 
         claim = Claim(
-            claim_id=data["claim_id"],
-            total_charge=data["total_charge"],
-            place_of_service=data["facility_code"],
-            frequency_code=data["claim_frequency"],
-            provider_accept_assignment=data["provider_accept_assignment"],
-            benefit_assignment=data["benefit_assignment"],
-            release_info_code=data["release_info_code"],
-            special_program_indicator=data.get("special_program_indicator", ""),
-            delay_reason_code=data.get("delay_reason_code", ""),
-            billing_provider=BillingProvider(
-                npi=self._billing_provider.npi,
-                entity_type=self._billing_provider.entity_type,
-                last_name=self._billing_provider.last_name,
-                first_name=self._billing_provider.first_name,
-                org_name=self._billing_provider.org_name,
-                address1=self._billing_provider.address1,
-                address2=self._billing_provider.address2,
-                city=self._billing_provider.city,
-                state=self._billing_provider.state,
-                zip_code=self._billing_provider.zip_code,
-                tax_id=self._billing_provider.tax_id,
-                taxonomy=self._billing_provider.taxonomy,
+            claim_id                  = data["claim_id"],
+            total_charge              = data["total_charge"],
+            place_of_service          = data["facility_code"],
+            frequency_code            = data["claim_frequency"],
+            provider_accept_assignment = data["provider_accept_assignment"],
+            benefit_assignment        = data["benefit_assignment"],
+            release_info_code         = data["release_info_code"],
+            special_program_indicator = data.get("special_program_indicator", ""),
+            delay_reason_code         = data.get("delay_reason_code", ""),
+            billing_provider = BillingProvider(
+                npi         = self._billing_provider.npi,
+                entity_type = self._billing_provider.entity_type,
+                last_name   = self._billing_provider.last_name,
+                first_name  = self._billing_provider.first_name,
+                org_name    = self._billing_provider.org_name,
+                address1    = self._billing_provider.address1,
+                address2    = self._billing_provider.address2,
+                city        = self._billing_provider.city,
+                state       = self._billing_provider.state,
+                zip_code    = self._billing_provider.zip_code,
+                tax_id      = self._billing_provider.tax_id,
+                taxonomy    = self._billing_provider.taxonomy,
             ),
-            subscriber=Subscriber(
-                member_id=self._subscriber.member_id,
-                last_name=self._subscriber.last_name,
-                first_name=self._subscriber.first_name,
-                middle_name=self._subscriber.middle_name,
-                dob=self._subscriber.dob,
-                gender=self._subscriber.gender,
-                group_number=self._subscriber.group_number,
-                payer_name=self._subscriber.payer_name,
-                payer_id=self._subscriber.payer_id,
-                relationship_code=self._subscriber.relationship_code,
-                insurance_type=self._subscriber.insurance_type,
-                claim_filing_indicator=self._subscriber.claim_filing_indicator,
+            pay_to_provider = _copy_provider(self._pay_to_provider),
+            subscriber = Subscriber(
+                member_id              = self._subscriber.member_id,
+                last_name              = self._subscriber.last_name,
+                first_name             = self._subscriber.first_name,
+                middle_name            = self._subscriber.middle_name,
+                dob                    = self._subscriber.dob,
+                gender                 = self._subscriber.gender,
+                group_number           = self._subscriber.group_number,
+                payer_name             = self._subscriber.payer_name,
+                payer_id               = self._subscriber.payer_id,
+                relationship_code      = self._subscriber.relationship_code,
+                insurance_type         = self._subscriber.insurance_type,
+                claim_filing_indicator = self._subscriber.claim_filing_indicator,
+                address1               = self._subscriber.address1,
+                address2               = self._subscriber.address2,
+                city                   = self._subscriber.city,
+                state                  = self._subscriber.state,
+                zip_code               = self._subscriber.zip_code,
             ),
         )
 
-        # Attach buffered patient if available
+        # Attach buffered patient
         if self._pending_patient is not None:
             claim.patient = self._pending_patient
             self._pending_patient = None
 
         self._current_claim = claim
+        self._active_provider = None   # reset; 2310 providers arrive after CLM
         self._loop = Loop.L2300
         self._record_raw(raw, pos, Loop.L2300)
 
     # ------------------------------------------------------------------
-    # N3 / N4 / REF / DMG context appliers
+    # N3 / N4 context appliers
     # ------------------------------------------------------------------
 
     def _apply_n3(self, data: dict) -> None:
         if self._loop == Loop.L2010AA:
             self._billing_provider.address1 = data.get("address1", "")
             self._billing_provider.address2 = data.get("address2", "")
+        elif self._loop == Loop.L2010BA:
+            self._subscriber.address1 = data.get("address1", "")
+            self._subscriber.address2 = data.get("address2", "")
         elif self._loop == Loop.L2010CA:
             target = (
                 self._current_claim.patient
@@ -430,18 +506,34 @@ class EDI837PStateMachine:
             )
             if target:
                 target.address1 = data.get("address1", "")
+                target.address2 = data.get("address2", "")
+        elif self._active_provider is not None:
+            # 2010AB pay-to or any 2310 provider sub-loop
+            self._active_provider.address1 = data.get("address1", "")
+            self._active_provider.address2 = data.get("address2", "")
 
     def _apply_n4(self, data: dict) -> None:
         if self._loop == Loop.L2010AA:
-            self._billing_provider.city = data.get("city", "")
-            self._billing_provider.state = data.get("state", "")
+            self._billing_provider.city    = data.get("city", "")
+            self._billing_provider.state   = data.get("state", "")
             self._billing_provider.zip_code = data.get("zip_code", "")
+        elif self._loop == Loop.L2010BA:
+            self._subscriber.city    = data.get("city", "")
+            self._subscriber.state   = data.get("state", "")
+            self._subscriber.zip_code = data.get("zip_code", "")
         elif self._loop == Loop.L2010CA and self._current_claim and self._current_claim.patient:
-            self._current_claim.patient.city = data.get("city", "")
-            self._current_claim.patient.state = data.get("state", "")
+            self._current_claim.patient.city    = data.get("city", "")
+            self._current_claim.patient.state   = data.get("state", "")
             self._current_claim.patient.zip_code = data.get("zip_code", "")
+        elif self._active_provider is not None:
+            self._active_provider.city    = data.get("city", "")
+            self._active_provider.state   = data.get("state", "")
+            self._active_provider.zip_code = data.get("zip_code", "")
 
-    # Claim-level REF qualifiers we recognise and surface by name
+    # ------------------------------------------------------------------
+    # REF handler
+    # ------------------------------------------------------------------
+
     _CLAIM_REF_MAP = {
         "G1": "prior_auth_number",
         "9F": "referral_number",
@@ -452,30 +544,30 @@ class EDI837PStateMachine:
 
     def _apply_ref(self, data: dict) -> None:
         qualifier = data.get("qualifier", "")
-        value = data.get("value", "")
+        value     = data.get("value", "")
 
-        # Billing provider EIN
         if qualifier == "EI" and self._loop == Loop.L2010AA:
             self._billing_provider.tax_id = value
             return
 
-        # Payer-assigned group number
         if qualifier == "G2" and self._loop == Loop.L2010BB:
             self._subscriber.group_number = value
             return
 
-        # Claim-level reference numbers (2300 context or adjacent 2310 sub-loops)
         if self._current_claim is not None:
             attr = self._CLAIM_REF_MAP.get(qualifier)
             if attr:
                 setattr(self._current_claim, attr, value)
             else:
-                # Capture unrecognised REFs in the extras dict (no silent loss)
                 self._current_claim.ref_extras[qualifier] = value
+
+    # ------------------------------------------------------------------
+    # DMG handler
+    # ------------------------------------------------------------------
 
     def _apply_dmg(self, data: dict) -> None:
         if self._loop == Loop.L2010BA:
-            self._subscriber.dob = data.get("dob", "")
+            self._subscriber.dob    = data.get("dob", "")
             self._subscriber.gender = data.get("gender", "")
         elif self._loop == Loop.L2010CA:
             target = (
@@ -484,7 +576,7 @@ class EDI837PStateMachine:
                 else self._pending_patient
             )
             if target:
-                target.dob = data.get("dob", "")
+                target.dob    = data.get("dob", "")
                 target.gender = data.get("gender", "")
 
     # ------------------------------------------------------------------
@@ -516,6 +608,32 @@ class EDI837PStateMachine:
             self._current_claim.raw_segments.append(
                 RawSegment(segment=raw, position=pos, loop=loop.value)
             )
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _copy_provider(src: Optional[Provider]) -> Optional[Provider]:
+    """Shallow-copy a Provider dataclass (all fields are str — safe)."""
+    if src is None:
+        return None
+    return Provider(
+        qualifier    = src.qualifier,
+        entity_type  = src.entity_type,
+        last_name    = src.last_name,
+        first_name   = src.first_name,
+        middle_name  = src.middle_name,
+        npi          = src.npi,
+        id_qualifier = src.id_qualifier,
+        id_code      = src.id_code,
+        taxonomy     = src.taxonomy,
+        address1     = src.address1,
+        address2     = src.address2,
+        city         = src.city,
+        state        = src.state,
+        zip_code     = src.zip_code,
+    )
 
 
 HL_LOOP_MAP = {"20": "2000A", "22": "2000B", "23": "2000C"}

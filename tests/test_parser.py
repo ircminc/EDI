@@ -326,3 +326,165 @@ class TestBatch1Features:
     def test_subscriber_middle_name_propagated(self):
         # valid_single has no middle name; batch1 fixture has none either — verify no crash
         assert self._c.subscriber.middle_name == ""
+
+
+# ---------------------------------------------------------------------------
+# Batch 2 — Provider completeness + address completeness tests
+# ---------------------------------------------------------------------------
+
+class TestBatch2Features:
+    """Tests for Batch 2: pay-to provider, 2310 providers, subscriber address,
+    patient address2, PRV taxonomy in 2310 context."""
+
+    @pytest.fixture(autouse=True)
+    def _claims(self, batch2_features_bytes):
+        self._all = _parse_file(batch2_features_bytes)
+        assert len(self._all) == 1
+        self._c = self._all[0].claim
+
+    # ── Pay-to Provider (2010AB NM1*87) ─────────────────────────────────
+    def test_pay_to_provider_extracted(self):
+        assert self._c.pay_to_provider is not None
+
+    def test_pay_to_provider_name(self):
+        assert self._c.pay_to_provider.last_name == "BILLING SOLUTIONS INC"
+
+    def test_pay_to_provider_npi(self):
+        assert self._c.pay_to_provider.npi == "9876543210"
+
+    def test_pay_to_provider_qualifier(self):
+        assert self._c.pay_to_provider.qualifier == "87"
+
+    def test_pay_to_provider_address1(self):
+        assert self._c.pay_to_provider.address1 == "200 BILLING AVE"
+
+    def test_pay_to_provider_address2(self):
+        assert self._c.pay_to_provider.address2 == "SUITE 300"
+
+    def test_pay_to_provider_city(self):
+        assert self._c.pay_to_provider.city == "BILLCITY"
+
+    def test_pay_to_provider_state(self):
+        assert self._c.pay_to_provider.state == "CA"
+
+    def test_pay_to_provider_zip(self):
+        assert self._c.pay_to_provider.zip_code == "90210"
+
+    # ── Rendering Provider (2310D NM1*82) ───────────────────────────────
+    def test_rendering_provider_extracted(self):
+        assert self._c.rendering_provider is not None
+
+    def test_rendering_provider_last_name(self):
+        assert self._c.rendering_provider.last_name == "JONES"
+
+    def test_rendering_provider_first_name(self):
+        assert self._c.rendering_provider.first_name == "ALICE"
+
+    def test_rendering_provider_middle_name(self):
+        assert self._c.rendering_provider.middle_name == "M"
+
+    def test_rendering_provider_npi(self):
+        assert self._c.rendering_provider.npi == "5678901234"
+
+    def test_rendering_provider_taxonomy(self):
+        # PRV*PE*ZZ*208000000X follows NM1*82
+        assert self._c.rendering_provider.taxonomy == "208000000X"
+
+    def test_rendering_provider_qualifier(self):
+        assert self._c.rendering_provider.qualifier == "82"
+
+    # ── Service Facility (2310E NM1*77) ─────────────────────────────────
+    def test_service_facility_extracted(self):
+        assert self._c.service_facility is not None
+
+    def test_service_facility_name(self):
+        assert self._c.service_facility.last_name == "MAIN CLINIC"
+
+    def test_service_facility_npi(self):
+        assert self._c.service_facility.npi == "1122334455"
+
+    def test_service_facility_address1(self):
+        assert self._c.service_facility.address1 == "500 CLINIC BLVD"
+
+    def test_service_facility_city(self):
+        assert self._c.service_facility.city == "MEDCITY"
+
+    def test_service_facility_state(self):
+        assert self._c.service_facility.state == "FL"
+
+    def test_service_facility_zip(self):
+        assert self._c.service_facility.zip_code == "33101"
+
+    # ── Referring Provider (2310A NM1*DN) ───────────────────────────────
+    def test_referring_provider_extracted(self):
+        assert self._c.referring_provider is not None
+
+    def test_referring_provider_last_name(self):
+        assert self._c.referring_provider.last_name == "BROWN"
+
+    def test_referring_provider_first_name(self):
+        assert self._c.referring_provider.first_name == "WILLIAM"
+
+    def test_referring_provider_npi(self):
+        assert self._c.referring_provider.npi == "9988776655"
+
+    def test_referring_provider_qualifier(self):
+        assert self._c.referring_provider.qualifier == "DN"
+
+    # ── Subscriber Address (2010BA N3/N4) ───────────────────────────────
+    def test_subscriber_address1(self):
+        assert self._c.subscriber.address1 == "301 SUBSCRIBER ST"
+
+    def test_subscriber_city(self):
+        assert self._c.subscriber.city == "SUBTOWN"
+
+    def test_subscriber_state(self):
+        assert self._c.subscriber.state == "NY"
+
+    def test_subscriber_zip(self):
+        assert self._c.subscriber.zip_code == "10001"
+
+    def test_subscriber_middle_name(self):
+        assert self._c.subscriber.middle_name == "J"
+
+    # ── to_dict includes all new provider fields ─────────────────────────
+    def test_to_dict_has_pay_to_provider(self):
+        d = self._all[0].to_dict()["claim"]
+        assert d["pay_to_provider"] is not None
+        assert d["pay_to_provider"]["npi"] == "9876543210"
+
+    def test_to_dict_has_rendering_provider(self):
+        d = self._all[0].to_dict()["claim"]
+        assert d["rendering_provider"] is not None
+        assert d["rendering_provider"]["taxonomy"] == "208000000X"
+
+    def test_to_dict_has_service_facility(self):
+        d = self._all[0].to_dict()["claim"]
+        assert d["service_facility"] is not None
+        assert d["service_facility"]["city"] == "MEDCITY"
+
+    def test_to_dict_has_referring_provider(self):
+        d = self._all[0].to_dict()["claim"]
+        assert d["referring_provider"] is not None
+        assert d["referring_provider"]["last_name"] == "BROWN"
+
+    def test_to_dict_has_subscriber_address(self):
+        d = self._all[0].to_dict()["claim"]
+        assert d["subscriber"]["address1"] == "301 SUBSCRIBER ST"
+        assert d["subscriber"]["state"] == "NY"
+
+    def test_to_dict_absent_providers_are_none(self):
+        d = self._all[0].to_dict()["claim"]
+        assert d["supervising_provider"] is None
+        assert d["ordered_provider"] is None
+        assert d["purchased_service_provider"] is None
+
+    # ── No regression: Batch 1 fields still work ────────────────────────
+    def test_billing_provider_npi_unchanged(self):
+        assert self._c.billing_provider.npi == "1234567890"
+
+    def test_billing_provider_tax_id_unchanged(self):
+        assert self._c.billing_provider.tax_id == "123456789"
+
+    def test_service_line_date_unchanged(self):
+        assert self._c.service_lines[0].date == "2024-02-01"
