@@ -267,11 +267,100 @@ def _error_pills(errors: list) -> str:
     return "&nbsp;".join(parts) if parts else '<span style="color:#6b7280;font-size:0.8rem">—</span>'
 
 
+def _kv(label: str, value: str) -> None:
+    """Render a single label: value row in the detail panel."""
+    if value:
+        st.markdown(
+            f'<div style="display:flex;gap:8px;margin:2px 0">'
+            f'<span style="color:#9ca3af;font-size:0.82rem;min-width:160px">{label}</span>'
+            f'<span style="font-size:0.85rem">{value}</span></div>',
+            unsafe_allow_html=True,
+        )
+
+
 def _render_detail(canonical: CanonicalClaim, result: ValidationResult) -> None:
     """Inline detail panel rendered below a row."""
     c = canonical.claim
-    tab1, tab2, tab3 = st.tabs(["Validation Errors", "Raw Segments", "Full Payload"])
+    tab0, tab1, tab2, tab3 = st.tabs(
+        ["Claim Info", "Validation Errors", "Raw Segments", "Full Payload"]
+    )
 
+    # ── Tab 0: Claim Info ───────────────────────────────────────────────────
+    with tab0:
+        col_left, col_right = st.columns(2)
+
+        with col_left:
+            st.markdown("**Claim**")
+            _kv("Claim ID", c.claim_id)
+            _kv("Total Charge", f"${c.total_charge:,.2f}")
+            _kv("Place of Service", c.place_of_service)
+            _kv("Frequency Code", c.frequency_code)
+            _kv("Release of Info", c.release_info_code)
+            _kv("Special Program", c.special_program_indicator)
+            _kv("Delay Reason", c.delay_reason_code)
+
+            st.markdown("**Clinical Dates**")
+            _kv("Service Date From", c.service_date_from)
+            _kv("Service Date To", c.service_date_to)
+            _kv("Onset Date", c.onset_date)
+            _kv("Accident Date", c.accident_date)
+
+        with col_right:
+            st.markdown("**Reference Numbers**")
+            _kv("Prior Auth Number", c.prior_auth_number)
+            _kv("Referral Number", c.referral_number)
+            _kv("Payer Claim Ctrl #", c.payer_claim_ctrl_number)
+            _kv("Medical Record #", c.medical_record_number)
+            _kv("Patient Control #", c.patient_control_number)
+            if c.ref_extras:
+                st.markdown("**Other REF Segments**")
+                for qual, val in c.ref_extras.items():
+                    _kv(f"REF*{qual}", val)
+
+            st.markdown("**Provider**")
+            _kv("Billing NPI", c.billing_provider.npi)
+            _kv("Tax ID (EIN)", c.billing_provider.tax_id)
+            _kv("Taxonomy", c.billing_provider.taxonomy)
+
+            st.markdown("**Coverage**")
+            _kv("Insurance Type", c.subscriber.insurance_type)
+            _kv("Claim Filing", c.subscriber.claim_filing_indicator)
+            _kv("Group Number", c.subscriber.group_number)
+            _kv("Payer", c.subscriber.payer_name)
+
+        # Diagnosis codes
+        if c.diagnosis_codes:
+            st.markdown("**Diagnosis Codes**")
+            diag_cols = st.columns(min(len(c.diagnosis_codes), 5))
+            for i, dx in enumerate(c.diagnosis_codes):
+                qual = dx.get("qualifier", "")
+                code = dx.get("code", "")
+                label = "Principal" if qual == "BK" else ("Other" if qual == "BF" else qual)
+                diag_cols[i % 5].markdown(
+                    f'<div style="text-align:center;padding:4px 8px;'
+                    f'background:rgba(255,255,255,0.06);border-radius:6px;margin:2px">'
+                    f'<div style="font-size:0.7rem;color:#9ca3af">{label}</div>'
+                    f'<div style="font-size:0.9rem;font-weight:600">{code}</div></div>',
+                    unsafe_allow_html=True,
+                )
+
+        # Service lines summary
+        if c.service_lines:
+            st.markdown("**Service Lines**")
+            for sl in c.service_lines:
+                mods = " ".join(m for m in [sl.modifier, sl.modifier2, sl.modifier3, sl.modifier4] if m)
+                st.markdown(
+                    f'<div style="font-size:0.82rem;margin:2px 0;padding:3px 8px;'
+                    f'background:rgba(255,255,255,0.04);border-radius:4px">'
+                    f'Line {sl.line_number} &nbsp;·&nbsp; '
+                    f'<code>{sl.procedure_code}</code>'
+                    + (f' &nbsp;<span style="color:#93c5fd">{mods}</span>' if mods else "") +
+                    f' &nbsp;·&nbsp; ${sl.charge:,.2f} &nbsp;·&nbsp; {sl.date or "—"}'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
+
+    # ── Tab 1: Validation Errors ────────────────────────────────────────────
     with tab1:
         if not result.errors:
             st.success("No validation errors — claim passed all SNIP checks.")
@@ -285,6 +374,7 @@ def _render_detail(canonical: CanonicalClaim, result: ValidationResult) -> None:
                 if err.raw_segment:
                     st.code(err.raw_segment, language="text")
 
+    # ── Tab 2: Raw Segments ─────────────────────────────────────────────────
     with tab2:
         if not c.raw_segments:
             st.info("No raw segments captured.")
@@ -294,6 +384,7 @@ def _render_detail(canonical: CanonicalClaim, result: ValidationResult) -> None:
                 language="text",
             )
 
+    # ── Tab 3: Full Payload ─────────────────────────────────────────────────
     with tab3:
         payload = canonical.to_dict()
         st.json(json.dumps(payload, default=_decimal_default, indent=2))

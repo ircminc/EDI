@@ -193,3 +193,136 @@ class TestStateMachine:
         """A bad HL should not prevent claim extraction."""
         claims = _parse_file(hl_parent_error_bytes)
         assert len(claims) >= 1
+
+    def test_diagnosis_codes_are_dicts(self, valid_single_bytes):
+        """HI now returns list of {qualifier, code} dicts."""
+        claims = _parse_file(valid_single_bytes)
+        codes = claims[0].claim.diagnosis_codes
+        assert len(codes) > 0
+        assert "qualifier" in codes[0]
+        assert "code" in codes[0]
+
+    def test_diagnosis_bk_qualifier(self, valid_single_bytes):
+        claims = _parse_file(valid_single_bytes)
+        assert claims[0].claim.diagnosis_codes[0]["qualifier"] == "BK"
+
+    def test_to_dict_includes_new_fields(self, valid_single_bytes):
+        d = _parse_file(valid_single_bytes)[0].to_dict()["claim"]
+        assert "service_date_from" in d
+        assert "service_date_to" in d
+        assert "special_program_indicator" in d
+        assert "delay_reason_code" in d
+        assert "prior_auth_number" in d
+        assert "ref_extras" in d
+        bp = d["billing_provider"]
+        assert "taxonomy" in bp
+        sub = d["subscriber"]
+        assert "insurance_type" in sub
+        assert "claim_filing_indicator" in sub
+        for sl in d["service_lines"]:
+            assert "modifier2" in sl
+            assert "modifier3" in sl
+            assert "modifier4" in sl
+
+
+# ---------------------------------------------------------------------------
+# Batch 1 — remediation feature tests
+# ---------------------------------------------------------------------------
+
+class TestBatch1Features:
+    """Tests for Batch 1 remediation: PRV taxonomy, SBR completeness,
+    CLM10-11, REF claim-level, DTP named dates, SV1 modifiers 2-4,
+    HI qualifier tagging."""
+
+    @pytest.fixture(autouse=True)
+    def _claims(self, batch1_features_bytes):
+        self._all = _parse_file(batch1_features_bytes)
+        assert len(self._all) == 1
+        self._c = self._all[0].claim
+
+    # --- PRV fix: taxonomy must NOT overwrite tax_id ---
+    def test_prv_taxonomy_stored_correctly(self):
+        assert self._c.billing_provider.taxonomy == "207Q00000X"
+
+    def test_prv_does_not_pollute_tax_id(self):
+        # tax_id comes from REF*EI only
+        assert self._c.billing_provider.tax_id == "123456789"
+
+    # --- SBR completeness ---
+    def test_sbr_insurance_type(self):
+        assert self._c.subscriber.insurance_type == "MB"
+
+    def test_sbr_claim_filing_indicator(self):
+        assert self._c.subscriber.claim_filing_indicator == "12"
+
+    # --- CLM extensions ---
+    def test_clm_special_program_indicator(self):
+        assert self._c.special_program_indicator == "09"
+
+    def test_clm_delay_reason_code(self):
+        assert self._c.delay_reason_code == "3"
+
+    # --- REF claim-level handlers ---
+    def test_ref_prior_auth_number(self):
+        assert self._c.prior_auth_number == "PA12345"
+
+    def test_ref_referral_number(self):
+        assert self._c.referral_number == "REF98765"
+
+    def test_ref_payer_claim_ctrl_number(self):
+        assert self._c.payer_claim_ctrl_number == "PAYERCTRL001"
+
+    def test_ref_medical_record_number(self):
+        assert self._c.medical_record_number == "MED100"
+
+    def test_ref_patient_control_number(self):
+        assert self._c.patient_control_number == "PATCTRL001"
+
+    def test_ref_extras_captures_unknown_qualifier(self):
+        assert "ZZ" in self._c.ref_extras
+        assert self._c.ref_extras["ZZ"] == "UNKNOWN_VALUE"
+
+    # --- DTP named dates ---
+    def test_dtp_onset_date(self):
+        assert self._c.onset_date == "2023-12-15"
+
+    def test_dtp_accident_date(self):
+        assert self._c.accident_date == "2023-12-10"
+
+    # --- SV1 modifiers 2-4 ---
+    def test_sv1_modifier1(self):
+        assert self._c.service_lines[0].modifier == "25"
+
+    def test_sv1_modifier2(self):
+        assert self._c.service_lines[0].modifier2 == "52"
+
+    def test_sv1_modifier3(self):
+        assert self._c.service_lines[0].modifier3 == "GT"
+
+    def test_sv1_modifier4(self):
+        assert self._c.service_lines[0].modifier4 == ""
+
+    # --- HI qualifier tagging ---
+    def test_hi_bk_qualifier(self):
+        codes = self._c.diagnosis_codes
+        bk = [d for d in codes if d["qualifier"] == "BK"]
+        assert len(bk) == 1
+        assert bk[0]["code"] == "J06.9"
+
+    def test_hi_bf_qualifier(self):
+        codes = self._c.diagnosis_codes
+        bf = [d for d in codes if d["qualifier"] == "BF"]
+        assert len(bf) == 1
+        assert bf[0]["code"] == "M79.3"
+
+    # --- service_date split ---
+    def test_service_date_from_populated_from_line(self):
+        # No claim-level DTP*472; date comes from service line
+        # service_date_from should be empty (populated from line dates in UI)
+        assert self._c.service_date_from == ""
+        assert self._c.service_lines[0].date == "2024-01-01"
+
+    # --- subscriber middle_name propagated ---
+    def test_subscriber_middle_name_propagated(self):
+        # valid_single has no middle name; batch1 fixture has none either — verify no crash
+        assert self._c.subscriber.middle_name == ""

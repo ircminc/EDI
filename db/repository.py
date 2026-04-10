@@ -69,13 +69,35 @@ class ClaimRepository:
         payload_dict = canonical.to_dict()
         validation_log = [e.to_dict() for e in result.errors]
 
+        c = canonical.claim
+
+        # Resolve dos_from / dos_to — prefer claim-level dates, fall back to
+        # earliest/latest service-line dates (matching the UI display logic).
+        def _iso_or_none(val: str):
+            """Return val if it looks like YYYY-MM-DD, else None."""
+            v = (val or "").strip()
+            return v if len(v) == 10 and v[4] == "-" and v[7] == "-" else None
+
+        dos_from = _iso_or_none(c.service_date_from)
+        dos_to   = _iso_or_none(c.service_date_to)
+        if not dos_from:
+            line_dates = sorted(
+                sl.date for sl in c.service_lines
+                if sl.date and not " to " in sl.date and len(sl.date) == 10
+            )
+            if line_dates:
+                dos_from = line_dates[0]
+                dos_to   = line_dates[-1]
+
         sql = """
             INSERT INTO edi_claims
                 (file_name, sender_id, receiver_id, claim_id,
                  billing_npi, total_charge, status,
+                 dos_from, dos_to, prior_auth_number,
                  raw_payload, validation_log)
             VALUES
                 (%s, %s, %s, %s,
+                 %s, %s, %s,
                  %s, %s, %s,
                  %s::jsonb, %s::jsonb)
             RETURNING id
@@ -84,10 +106,13 @@ class ClaimRepository:
             file_name,
             canonical.file.sender_id,
             canonical.file.receiver_id,
-            canonical.claim.claim_id,
-            canonical.claim.billing_provider.npi,
-            str(canonical.claim.total_charge),
+            c.claim_id,
+            c.billing_provider.npi,
+            str(c.total_charge),
             result.status,
+            dos_from,
+            dos_to,
+            c.prior_auth_number,
             _dumps(payload_dict),
             _dumps(validation_log),
         )
@@ -145,6 +170,7 @@ class ClaimRepository:
         sql = f"""
             SELECT id, file_name, sender_id, receiver_id,
                    claim_id, billing_npi, total_charge, status,
+                   dos_from, dos_to, prior_auth_number,
                    raw_payload, validation_log, created_at
             FROM edi_claims
             {where}
@@ -162,6 +188,7 @@ class ClaimRepository:
         sql = """
             SELECT id, file_name, sender_id, receiver_id,
                    claim_id, billing_npi, total_charge, status,
+                   dos_from, dos_to, prior_auth_number,
                    raw_payload, validation_log, created_at
             FROM edi_claims WHERE id = %s
         """
