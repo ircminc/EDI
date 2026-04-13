@@ -84,6 +84,16 @@ persist_to_db = st.sidebar.checkbox(
     help="Requires PGHOST / PGUSER / PGPASSWORD / PGDATABASE env vars.",
 )
 
+lenient_mode = st.sidebar.checkbox(
+    "⚠ Allow missing IEA (lenient)",
+    value=False,
+    help=(
+        "Process files even when the IEA interchange-closing segment is absent. "
+        "Claims found inside ST–SE blocks are still fully validated. "
+        "Enable this for files from vendors that omit the envelope footer."
+    ),
+)
+
 st.sidebar.markdown("---")
 st.sidebar.markdown("**Search**")
 search_claim = st.sidebar.text_input("Claim ID", key="search_claim")
@@ -121,14 +131,18 @@ def _decimal_default(obj):
     raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
 
 
-def process_file(raw_bytes: bytes, file_name: str) -> list[tuple[CanonicalClaim, ValidationResult]]:
+def process_file(
+    raw_bytes: bytes,
+    file_name: str,
+    allow_truncated: bool = False,
+) -> list[tuple[CanonicalClaim, ValidationResult]]:
     """Full ingestion → parse → validate pipeline. Returns list of (claim, result)."""
     pairs: list[tuple[CanonicalClaim, ValidationResult]] = []
 
     content = normalize_file_content(raw_bytes)
     delimiters = detect_delimiters(content)
 
-    transactions = list(stream_transactions(content, delimiters))
+    transactions = list(stream_transactions(content, delimiters, allow_truncated=allow_truncated))
     total_tx = len(transactions)
 
     progress = st.progress(0, text="Starting…")
@@ -191,8 +205,15 @@ if uploaded is not None and st.sidebar.button("▶  Process File", type="primary
     raw = uploaded.read()
     try:
         with st.spinner("Ingesting…"):
-            pairs = process_file(raw, uploaded.name)
+            pairs = process_file(raw, uploaded.name, allow_truncated=lenient_mode)
         st.session_state.results = pairs
+
+        if lenient_mode:
+            st.warning(
+                "⚠ **Lenient mode active** — IEA segment may be missing. "
+                "Claims were extracted from ST–SE blocks and fully validated, "
+                "but the interchange envelope was not verified."
+            )
 
         if persist_to_db and _DB_AVAILABLE and pairs:
             try:
@@ -206,6 +227,10 @@ if uploaded is not None and st.sidebar.button("▶  Process File", type="primary
 
     except TruncatedFileError as e:
         st.error(f"File truncated (missing IEA): {e}")
+        st.info(
+            "💡 **Tip:** If your vendor produces files without the IEA closing segment, "
+            "enable **⚠ Allow missing IEA (lenient)** in the sidebar and re-process."
+        )
     except ValueError as e:
         st.error(f"Invalid file format: {e}")
     except Exception as e:

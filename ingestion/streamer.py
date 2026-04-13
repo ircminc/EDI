@@ -65,6 +65,7 @@ class TransactionBlock:
 def stream_transactions(
     content: str,
     delimiters: DelimiterSet,
+    allow_truncated: bool = False,
 ) -> Generator[TransactionBlock, None, None]:
     """
     Yield one :class:`TransactionBlock` per ST-SE pair found in *content*.
@@ -79,11 +80,15 @@ def stream_transactions(
         Normalized file content (BOM/CRLF already processed).
     delimiters:
         Delimiter set from :func:`detect_delimiters`.
+    allow_truncated:
+        When ``True``, a missing IEA segment is treated as a warning rather
+        than a fatal error.  Useful for files from vendors that omit the
+        interchange-closing segment.  Defaults to ``False`` (strict mode).
 
     Raises
     ------
     TruncatedFileError
-        If the IEA segment is absent.
+        If the IEA segment is absent **and** ``allow_truncated`` is ``False``.
     """
     seg_term = delimiters.segment
     ed = delimiters.element
@@ -94,8 +99,20 @@ def stream_transactions(
         s.strip() for s in content.split(seg_term) if s.strip()
     ]
 
-    # File-level integrity check (raises TruncatedFileError if IEA missing).
-    file_errors = validate_envelope(all_segments, delimiters)
+    # File-level integrity check.
+    # TruncatedFileError (missing IEA) is re-raised unless lenient mode is on.
+    try:
+        file_errors = validate_envelope(all_segments, delimiters)
+    except TruncatedFileError:
+        if allow_truncated:
+            log.warning(
+                "IEA segment not found — processing in lenient mode. "
+                "Claims extracted from ST-SE blocks will still be validated."
+            )
+            file_errors = []
+        else:
+            raise
+
     if file_errors:
         for err in file_errors:
             log.warning("Envelope error: %s", str(err))

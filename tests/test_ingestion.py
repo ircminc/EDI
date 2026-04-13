@@ -153,3 +153,38 @@ class TestStreaming:
         # Peak must stay under 200 MB
         assert peak < 200 * 1024 * 1024, f"Peak memory {peak/1024/1024:.1f} MB exceeded 200 MB"
         assert count >= 1
+
+    def test_missing_iea_lenient_mode_does_not_raise(self, missing_iea_bytes):
+        """allow_truncated=True must not raise TruncatedFileError."""
+        content = normalize_file_content(missing_iea_bytes)
+        d = detect_delimiters(content)
+        # Should complete without raising
+        blocks = list(stream_transactions(content, d, allow_truncated=True))
+        # The ST-SE blocks that exist must still be yielded
+        assert len(blocks) >= 1
+
+    def test_missing_iea_lenient_yields_transactions(self, missing_iea_bytes):
+        """Claims inside ST-SE blocks must be returned even without IEA."""
+        content = normalize_file_content(missing_iea_bytes)
+        d = detect_delimiters(content)
+        blocks = list(stream_transactions(content, d, allow_truncated=True))
+        assert all(isinstance(b, TransactionBlock) for b in blocks)
+        assert all(len(b.segments) > 0 for b in blocks)
+
+    def test_missing_iea_strict_still_raises(self, missing_iea_bytes):
+        """Default (strict) mode must still raise TruncatedFileError."""
+        content = normalize_file_content(missing_iea_bytes)
+        d = detect_delimiters(content)
+        with pytest.raises(TruncatedFileError):
+            list(stream_transactions(content, d, allow_truncated=False))
+
+    def test_valid_file_lenient_mode_unchanged(self, valid_single_bytes):
+        """allow_truncated=True on a complete file must behave identically to strict."""
+        content = normalize_file_content(valid_single_bytes)
+        d = detect_delimiters(content)
+        strict_blocks  = list(stream_transactions(content, d, allow_truncated=False))
+        lenient_blocks = list(stream_transactions(content, d, allow_truncated=True))
+        assert len(strict_blocks) == len(lenient_blocks)
+        assert [b.st_control_number for b in strict_blocks] == [
+            b.st_control_number for b in lenient_blocks
+        ]
