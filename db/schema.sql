@@ -18,6 +18,10 @@ CREATE TABLE IF NOT EXISTS edi_claims (
     -- Surfaced reference numbers for fast lookups
     prior_auth_number    TEXT         NOT NULL DEFAULT '',
 
+    -- Surfaced provider/payer columns for fast lookups (added Batch 4.2)
+    rendering_npi        TEXT         NOT NULL DEFAULT '',
+    payer_id             TEXT         NOT NULL DEFAULT '',
+
     raw_payload          JSONB        NOT NULL DEFAULT '{}',
     validation_log       JSONB        NOT NULL DEFAULT '[]',
     created_at           TIMESTAMPTZ  NOT NULL DEFAULT NOW()
@@ -39,11 +43,21 @@ CREATE INDEX IF NOT EXISTS idx_edi_claims_status
 CREATE INDEX IF NOT EXISTS idx_edi_claims_dos
     ON edi_claims (dos_from, dos_to);
 
+CREATE INDEX IF NOT EXISTS idx_edi_claims_rendering_npi
+    ON edi_claims (rendering_npi);
+
+CREATE INDEX IF NOT EXISTS idx_edi_claims_payer_id
+    ON edi_claims (payer_id);
+
 -- GIN index on JSONB payload for key-based searches
 CREATE INDEX IF NOT EXISTS idx_edi_claims_raw_payload
     ON edi_claims USING GIN (raw_payload);
 
 -- Migration script for existing installations (idempotent):
---   ALTER TABLE edi_claims ADD COLUMN IF NOT EXISTS dos_from DATE NULL;
---   ALTER TABLE edi_claims ADD COLUMN IF NOT EXISTS dos_to   DATE NULL;
---   ALTER TABLE edi_claims ADD COLUMN IF NOT EXISTS prior_auth_number TEXT NOT NULL DEFAULT '';
+--   ALTER TABLE edi_claims ADD COLUMN IF NOT EXISTS dos_from          DATE         NULL;
+--   ALTER TABLE edi_claims ADD COLUMN IF NOT EXISTS dos_to            DATE         NULL;
+--   ALTER TABLE edi_claims ADD COLUMN IF NOT EXISTS prior_auth_number TEXT         NOT NULL DEFAULT '';
+--   ALTER TABLE edi_claims ADD COLUMN IF NOT EXISTS rendering_npi     TEXT         NOT NULL DEFAULT '';
+--   ALTER TABLE edi_claims ADD COLUMN IF NOT EXISTS payer_id          TEXT         NOT NULL DEFAULT '';
+--   CREATE INDEX IF NOT EXISTS idx_edi_claims_rendering_npi ON edi_claims (rendering_npi);
+--   CREATE INDEX IF NOT EXISTS idx_edi_claims_payer_id      ON edi_claims (payer_id);

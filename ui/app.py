@@ -92,6 +92,20 @@ search_status = st.sidebar.selectbox(
     "Status", ["All", "Pass", "Fail"], key="search_status"
 )
 
+st.sidebar.markdown("**Date of Service Range**")
+search_dos_from = st.sidebar.date_input(
+    "DOS From",
+    value=None,
+    key="search_dos_from",
+    help="Filter claims with dos_from on or after this date.",
+)
+search_dos_to = st.sidebar.date_input(
+    "DOS To",
+    value=None,
+    key="search_dos_to",
+    help="Filter claims with dos_to on or before this date.",
+)
+
 # ---------------------------------------------------------------------------
 # Main area — title
 # ---------------------------------------------------------------------------
@@ -322,6 +336,16 @@ def _render_detail(canonical: CanonicalClaim, result: ValidationResult) -> None:
             _kv("Tax ID (EIN)", c.billing_provider.tax_id)
             _kv("Taxonomy", c.billing_provider.taxonomy)
 
+            st.markdown("**Patient Demographics**")
+            # Patient-level DOB/gender preferred; fall back to subscriber
+            _pat = canonical.claim.patient
+            _sub = canonical.claim.subscriber
+            _dob    = (_pat.dob    if _pat and _pat.dob    else _sub.dob)
+            _gender = (_pat.gender if _pat and _pat.gender else _sub.gender)
+            _gender_map = {"M": "Male", "F": "Female", "U": "Unknown"}
+            _kv("Date of Birth", _dob)
+            _kv("Gender", _gender_map.get(_gender, _gender))
+
             st.markdown("**Coverage**")
             _kv("Insurance Type", c.subscriber.insurance_type)
             _kv("Claim Filing", c.subscriber.claim_filing_indicator)
@@ -520,6 +544,24 @@ if results:
     if search_status != "All":
         filtered = [(c, r) for c, r in filtered if r.status == search_status]
 
+    # ── Summary metrics bar ──────────────────────────────────────────────────
+    total_claims    = len(filtered)
+    pass_count      = sum(1 for _, r in filtered if r.status == "Pass")
+    fail_count      = total_claims - pass_count
+    total_charge    = sum(c.claim.total_charge for c, _ in filtered)
+    pass_rate_pct   = (pass_count / total_claims * 100) if total_claims else 0.0
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Total Claims",  total_claims)
+    m2.metric("Pass Rate",     f"{pass_rate_pct:.1f}%")
+    m3.metric("Failed Claims", fail_count)
+    m4.metric("Total Charges", f"${total_charge:,.2f}")
+    st.markdown(
+        '<hr style="margin:4px 0 12px 0;border:none;border-top:1px solid rgba(255,255,255,0.1)">',
+        unsafe_allow_html=True,
+    )
+    # ── End metrics bar ──────────────────────────────────────────────────────
+
     st.markdown(f"### Results — {len(filtered)} claim(s)")
 
     # ClaimID | NPI | PatientName | DateOfService | Charge | Status | Errors | Toggle
@@ -602,6 +644,8 @@ if _DB_AVAILABLE and not results:
                     claim_id=search_claim or None,
                     billing_npi=search_npi or None,
                     status=search_status if search_status != "All" else None,
+                    dos_from=search_dos_from.isoformat() if search_dos_from else None,
+                    dos_to=search_dos_to.isoformat() if search_dos_to else None,
                 )
             if rows:
                 st.dataframe(

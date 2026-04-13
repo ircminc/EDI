@@ -89,16 +89,23 @@ class ClaimRepository:
                 dos_from = line_dates[0]
                 dos_to   = line_dates[-1]
 
+        rendering_npi = (
+            c.rendering_provider.npi if c.rendering_provider else ""
+        )
+        payer_id = c.subscriber.payer_id
+
         sql = """
             INSERT INTO edi_claims
                 (file_name, sender_id, receiver_id, claim_id,
                  billing_npi, total_charge, status,
                  dos_from, dos_to, prior_auth_number,
+                 rendering_npi, payer_id,
                  raw_payload, validation_log)
             VALUES
                 (%s, %s, %s, %s,
                  %s, %s, %s,
                  %s, %s, %s,
+                 %s, %s,
                  %s::jsonb, %s::jsonb)
             RETURNING id
         """
@@ -113,6 +120,8 @@ class ClaimRepository:
             dos_from,
             dos_to,
             c.prior_auth_number,
+            rendering_npi,
+            payer_id,
             _dumps(payload_dict),
             _dumps(validation_log),
         )
@@ -144,6 +153,8 @@ class ClaimRepository:
         claim_id: Optional[str] = None,
         billing_npi: Optional[str] = None,
         status: Optional[str] = None,
+        dos_from: Optional[str] = None,
+        dos_to: Optional[str] = None,
         limit: int = 500,
         offset: int = 0,
     ) -> list[dict[str, Any]]:
@@ -151,6 +162,8 @@ class ClaimRepository:
         Search edi_claims with optional filters.
 
         All text filters use exact match for indexed performance.
+        ``dos_from`` / ``dos_to`` are ISO-8601 date strings (YYYY-MM-DD);
+        either may be omitted for an open-ended range query.
         Returns plain dicts (no psycopg2 row objects).
         """
         conditions = []
@@ -165,12 +178,19 @@ class ClaimRepository:
         if status:
             conditions.append("status = %s")
             params.append(status)
+        if dos_from:
+            conditions.append("dos_from >= %s")
+            params.append(dos_from)
+        if dos_to:
+            conditions.append("dos_to <= %s")
+            params.append(dos_to)
 
         where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
         sql = f"""
             SELECT id, file_name, sender_id, receiver_id,
                    claim_id, billing_npi, total_charge, status,
                    dos_from, dos_to, prior_auth_number,
+                   rendering_npi, payer_id,
                    raw_payload, validation_log, created_at
             FROM edi_claims
             {where}
@@ -189,6 +209,7 @@ class ClaimRepository:
             SELECT id, file_name, sender_id, receiver_id,
                    claim_id, billing_npi, total_charge, status,
                    dos_from, dos_to, prior_auth_number,
+                   rendering_npi, payer_id,
                    raw_payload, validation_log, created_at
             FROM edi_claims WHERE id = %s
         """
@@ -222,3 +243,69 @@ class ClaimRepository:
         with self._conn.cursor() as cur:
             cur.execute(sql, params)
             return cur.fetchone()[0]
+
+    def get_stats(self) -> dict[str, Any]:
+        """
+        Return aggregate statistics across all claims in the table.
+
+        Keys returned:
+          total_claim_count  int
+          pass_count         int
+          fail_count         int
+          pass_rate          float   (0.0 – 1.0; 0.0 when no claims exist)
+          total_charge_sum   Decimal
+          warning_count_sum  int     (count of validation_log entries with severity='warning')
+          error_count_sum    int     (count of validation_log entries with severity='error')
+        """
+        sql = """
+            SELECT
+                COUNT(*)                                                    AS total_claim_count,
+                COUNT(*) FILTER (WHERE status = 'Pass')                    AS pass_count,
+                COUNT(*) FILTER (WHERE status = 'Fail')                    AS fail_count,
+                COALESCE(SUM(total_charge), 0)                             AS total_charge_sum,
+                COALESCE(
+                    SUM(
+                        (SELECT COUNT(*) FROM jsonb_array_elements(validation_log) AS e
+                         WHERE e->>'severity' = 'warning')
+                    ), 0
+                )                                                           AS warning_count_sum,
+                COALESCE(
+                    SUM(
+                        (SELECT COUNT(*) FROM jsonb_array_elements(validation_log) AS e
+                         WHERE e->>'severity' = 'error')
+                    ), 0
+                )                                                           AS error_count_sum
+            FROM edi_claims
+        """
+        with self._conn.cursor() as cur:
+            cur.execute(sql)
+            row = cur.fetchone()
+
+        total        = int(row[0])
+        pass_count   = int(row[1])
+        fail_count   = int(row[2])
+        charge_sum   = Decimal(str(row[3])) if row[3] is not None else Decimal("0")
+        warn_sum     = int(row[4])
+        error_sum    = int(row[5])
+        pass_rate    = (pass_count / total) if total > 0 else 0.0
+
+        return {
+            "total_claim_count": total,
+            "pass_count":        pass_count,
+            "fail_count":        fail_count,
+            "pass_rate":         pass_rate,
+            "total_charge_sum":  charge_sum,
+            "warning_count_sum": warn_sum,
+            "error_count_sum":   error_sum,
+        }
+
+    def delete_by_file(self, file_name: str) -> int:
+        """
+        Delete all claims belonging to ``file_name``.
+
+        Returns the number of rows deleted.
+        """
+        sql = "DELETE FROM edi_claims WHERE file_name = %s"
+        with self._conn.cursor() as cur:
+            cur.execute(sql, (file_name,))
+            return cur.rowcount
