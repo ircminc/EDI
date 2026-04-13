@@ -373,11 +373,23 @@ def _render_detail(canonical: CanonicalClaim, result: ValidationResult) -> None:
                     unsafe_allow_html=True,
                 )
 
+        # Claim-level notes (Batch 4.1)
+        if c.notes:
+            st.markdown("**Clinical Notes**")
+            for note in c.notes:
+                st.markdown(
+                    f'<div style="font-size:0.82rem;padding:4px 8px;margin:2px 0;'
+                    f'background:rgba(250,204,21,0.08);border-left:3px solid #fbbf24;'
+                    f'border-radius:0 4px 4px 0">{note}</div>',
+                    unsafe_allow_html=True,
+                )
+
         # Service lines summary
         if c.service_lines:
             st.markdown("**Service Lines**")
             for sl in c.service_lines:
                 mods = " ".join(m for m in [sl.modifier, sl.modifier2, sl.modifier3, sl.modifier4] if m)
+                pos_str = f" &nbsp;·&nbsp; POS: {sl.place_of_service}" if sl.place_of_service else ""
                 st.markdown(
                     f'<div style="font-size:0.82rem;margin:2px 0;padding:3px 8px;'
                     f'background:rgba(255,255,255,0.04);border-radius:4px">'
@@ -385,7 +397,7 @@ def _render_detail(canonical: CanonicalClaim, result: ValidationResult) -> None:
                     f'<code>{sl.procedure_code}</code>'
                     + (f' &nbsp;<span style="color:#93c5fd">{mods}</span>' if mods else "") +
                     f' &nbsp;·&nbsp; ${sl.charge:,.2f} &nbsp;·&nbsp; {sl.date or "—"}'
-                    f'</div>',
+                    f'{pos_str}</div>',
                     unsafe_allow_html=True,
                 )
                 # NDC detail (Batch 3)
@@ -426,6 +438,16 @@ def _render_detail(canonical: CanonicalClaim, result: ValidationResult) -> None:
                         f'</div>',
                         unsafe_allow_html=True,
                     )
+                # Service-line notes (Batch 4.1)
+                for note in sl.notes:
+                    st.markdown(
+                        f'<div style="font-size:0.78rem;margin:0 0 2px 12px;'
+                        f'padding:2px 6px;background:rgba(250,204,21,0.06);'
+                        f'border-left:2px solid #fbbf24;border-radius:0 3px 3px 0">'
+                        f'{note}</div>',
+                        unsafe_allow_html=True,
+                    )
+
                 # Adjudication (2430, Batch 3)
                 for adj in sl.adjudications:
                     adj_line = (

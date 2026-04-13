@@ -62,6 +62,7 @@ from .segment_mapper import (
     map_n3,
     map_n4,
     map_nm1,
+    map_nte,
     map_pat,
     map_prv,
     map_ref,
@@ -317,16 +318,27 @@ class EDI837PStateMachine:
         elif seg_id == "SV1":
             if self._current_sl is not None:
                 data = map_sv1(els, cd)
-                self._current_sl.procedure_code = data["procedure_code"]
-                self._current_sl.modifier       = data["modifier1"]
-                self._current_sl.modifier2      = data["modifier2"]
-                self._current_sl.modifier3      = data["modifier3"]
-                self._current_sl.modifier4      = data["modifier4"]
-                self._current_sl.charge         = data["charge"]
-                self._current_sl.units          = data["unit_basis"]
-                self._current_sl.quantity       = data["quantity"]
+                self._current_sl.procedure_code    = data["procedure_code"]
+                self._current_sl.modifier          = data["modifier1"]
+                self._current_sl.modifier2         = data["modifier2"]
+                self._current_sl.modifier3         = data["modifier3"]
+                self._current_sl.modifier4         = data["modifier4"]
+                self._current_sl.charge            = data["charge"]
+                self._current_sl.units             = data["unit_basis"]
+                self._current_sl.quantity          = data["quantity"]
+                self._current_sl.place_of_service  = data["place_of_service"]  # SV105
                 self._current_sl.diagnosis_pointers = data["diagnosis_pointers"]
                 self._record_raw(raw, pos, Loop.L2400)
+
+        elif seg_id == "NTE":
+            data = map_nte(els)
+            note = data.get("description", "")
+            if note:
+                if self._current_sl is not None:
+                    self._current_sl.notes.append(note)
+                elif self._current_claim is not None:
+                    self._current_claim.notes.append(note)
+            self._record_raw(raw, pos, self._loop)
 
         elif seg_id == "SVD":
             if self._current_sl is not None:

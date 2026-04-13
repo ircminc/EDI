@@ -19,7 +19,7 @@ from parser.state_machine import EDI837PStateMachine
 from parser.hl_tracker import HLTracker
 from parser.segment_mapper import (
     to_date, to_decimal, map_sv1, map_clm, map_nm1,
-    map_lin, map_ctp, map_svd, map_cas, map_amt,
+    map_lin, map_ctp, map_svd, map_cas, map_amt, map_nte,
 )
 
 
@@ -716,3 +716,115 @@ class TestBatch3Features:
 
     def test_service_line_charge(self):
         assert self._c.service_lines[0].charge == Decimal("600")
+
+
+# ---------------------------------------------------------------------------
+# Batch 4.1 — SV105 place_of_service + NTE notes
+# ---------------------------------------------------------------------------
+
+class TestBatch4SegmentMappers:
+    """Unit tests for Batch 4.1 segment mapper additions."""
+
+    def test_map_sv1_place_of_service_extracted(self):
+        els = "SV1*HC:99213*200*UN*1*11**1".split("*")
+        result = map_sv1(els, ":")
+        assert result["place_of_service"] == "11"
+
+    def test_map_sv1_place_of_service_empty(self):
+        # Original format without SV105
+        els = "SV1*HC:99213*100*UN*1***1".split("*")
+        result = map_sv1(els, ":")
+        assert result["place_of_service"] == ""
+
+    def test_map_sv1_procedure_code_unchanged(self):
+        els = "SV1*HC:99213*200*UN*1*11**1".split("*")
+        result = map_sv1(els, ":")
+        assert result["procedure_code"] == "99213"
+        assert result["charge"] == Decimal("200")
+
+    def test_map_sv1_diag_pointer_still_extracted(self):
+        els = "SV1*HC:99213*200*UN*1*11**1".split("*")
+        result = map_sv1(els, ":")
+        assert result["diagnosis_pointers"] == ["1"]
+
+    def test_map_nte_basic(self):
+        els = "NTE*ADD*PRIOR AUTH ON FILE".split("*")
+        result = map_nte(els)
+        assert result["note_reference_code"] == "ADD"
+        assert result["description"] == "PRIOR AUTH ON FILE"
+
+    def test_map_nte_tpo_code(self):
+        els = "NTE*TPO*THIRD PARTY ORG NOTE".split("*")
+        result = map_nte(els)
+        assert result["note_reference_code"] == "TPO"
+        assert result["description"] == "THIRD PARTY ORG NOTE"
+
+    def test_map_nte_empty_description(self):
+        els = "NTE*ADD".split("*")
+        result = map_nte(els)
+        assert result["description"] == ""
+
+
+class TestBatch4Features:
+    """Integration tests for NTE notes and SV105 place_of_service."""
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, batch4_features_bytes):
+        self._all = _parse_file(batch4_features_bytes)
+        self._c = self._all[0].claim
+
+    # ── SV105 place_of_service ───────────────────────────────────────────
+
+    def test_sl_place_of_service_populated(self):
+        assert self._c.service_lines[0].place_of_service == "11"
+
+    def test_sl_place_of_service_in_to_dict(self):
+        d = self._all[0].to_dict()["claim"]
+        assert d["service_lines"][0]["place_of_service"] == "11"
+
+    # ── Claim-level NTE notes ────────────────────────────────────────────
+
+    def test_claim_notes_present(self):
+        assert len(self._c.notes) == 1
+
+    def test_claim_note_text(self):
+        assert self._c.notes[0] == "PRIOR AUTH ON FILE"
+
+    def test_claim_notes_in_to_dict(self):
+        d = self._all[0].to_dict()["claim"]
+        assert d["notes"] == ["PRIOR AUTH ON FILE"]
+
+    # ── Service-line NTE notes ───────────────────────────────────────────
+
+    def test_sl_notes_present(self):
+        sl = self._c.service_lines[0]
+        assert len(sl.notes) == 1
+
+    def test_sl_note_text(self):
+        sl = self._c.service_lines[0]
+        assert sl.notes[0] == "OFFICE VISIT WITH PNEUMONIA"
+
+    def test_sl_notes_in_to_dict(self):
+        d = self._all[0].to_dict()["claim"]
+        assert d["service_lines"][0]["notes"] == ["OFFICE VISIT WITH PNEUMONIA"]
+
+    # ── Claim note does NOT land in service line and vice versa ──────────
+
+    def test_claim_note_not_on_service_line(self):
+        sl = self._c.service_lines[0]
+        assert "PRIOR AUTH ON FILE" not in sl.notes
+
+    def test_sl_note_not_on_claim(self):
+        assert "OFFICE VISIT WITH PNEUMONIA" not in self._c.notes
+
+    # ── Regression: existing fields still work ───────────────────────────
+
+    def test_diagnosis_codes_present(self):
+        codes = [d["code"] for d in self._c.diagnosis_codes]
+        assert "J18.9" in codes
+
+    def test_service_line_charge(self):
+        assert self._c.service_lines[0].charge == Decimal("200")
+
+    def test_billing_npi_present(self):
+        assert self._c.billing_provider.npi == "1234567890"

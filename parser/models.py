@@ -133,6 +133,7 @@ class ServiceLine:
     amounts: dict = field(default_factory=dict)         # 2400 AMT qualifier → Decimal
     line_providers: list[Provider] = field(default_factory=list)  # 2420 NM1 variants
     adjudications: list[Adjudication] = field(default_factory=list)  # 2430 loops
+    notes: list[str] = field(default_factory=list)      # 2400 NTE free-text notes
 
 
 @dataclass
@@ -177,6 +178,7 @@ class Claim:
     purchased_service_provider: Optional[Provider] = None  # 2310B NM1*P3
 
     amounts: dict = field(default_factory=dict)           # 2300 AMT qualifier → Decimal
+    notes: list[str] = field(default_factory=list)        # 2300 NTE free-text notes
 
     subscriber: Subscriber = field(default_factory=Subscriber)
     patient: Optional[Patient] = None
@@ -329,6 +331,7 @@ class CanonicalClaim:
                     "relationship_code": c.patient.relationship_code,
                 } if c.patient else None,
                 "amounts": c.amounts,
+                "notes":   c.notes,
                 "service_lines": [
                     {
                         "line_number":       sl.line_number,
@@ -349,6 +352,7 @@ class CanonicalClaim:
                         "ndc_unit":          sl.ndc_unit,
                         "line_refs":         sl.line_refs,
                         "amounts":           sl.amounts,
+                        "notes":             sl.notes,
                         "line_providers":    [_provider_dict(p) for p in sl.line_providers],
                         "adjudications": [
                             {

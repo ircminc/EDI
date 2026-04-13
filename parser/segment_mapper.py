@@ -92,7 +92,12 @@ def map_clm(els: list[str], comp: str) -> dict[str, Any]:
 
 
 def map_sv1(els: list[str], comp: str) -> dict[str, Any]:
-    """SV1 — Professional Service."""
+    """SV1 — Professional Service.
+
+    SV101 = procedure composite, SV102 = charge, SV103 = unit basis,
+    SV104 = quantity, SV105 = facility type / place of service (optional),
+    SV106 = service type code (optional), SV107 = diagnosis pointer composite.
+    """
     proc_info = _e(els, 1).split(comp)
     diag_raw = _e(els, 7)
     diag_pointers = [d for d in diag_raw.split(comp) if d] if diag_raw else []
@@ -106,6 +111,7 @@ def map_sv1(els: list[str], comp: str) -> dict[str, Any]:
         "charge": to_decimal(_e(els, 2)),
         "unit_basis": _e(els, 3),
         "quantity": _e(els, 4),
+        "place_of_service": _e(els, 5),   # SV105 — facility type code
         "diagnosis_pointers": diag_pointers,
     }
 
@@ -243,6 +249,18 @@ def map_amt(els: list[str]) -> dict[str, Any]:
     return {
         "qualifier": _e(els, 1),
         "amount": to_decimal(_e(els, 2)),
+    }
+
+
+def map_nte(els: list[str]) -> dict[str, str]:
+    """NTE — Note/Special Instruction (2300 claim or 2400 service-line).
+
+    NTE01 = note reference code (ADD = additional information, TPO = third-party org).
+    NTE02 = free-form text description.
+    """
+    return {
+        "note_reference_code": _e(els, 1),
+        "description": _e(els, 2),
     }
 
 

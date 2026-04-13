@@ -87,6 +87,26 @@ def batch3_features_bytes():
 
 
 @pytest.fixture
+def batch4_features_bytes():
+    return fixture_bytes("batch4_features.edi")
+
+
+@pytest.fixture
+def missing_hi_bytes():
+    return fixture_bytes("missing_hi.edi")
+
+
+@pytest.fixture
+def missing_dos_bytes():
+    return fixture_bytes("missing_dos.edi")
+
+
+@pytest.fixture
+def missing_sv1_bytes():
+    return fixture_bytes("missing_sv1.edi")
+
+
+@pytest.fixture
 def large_file_bytes():
     """Generate a ~5MB valid EDI file programmatically for streaming tests."""
     base = fixture_bytes("valid_single.edi").decode("utf-8")

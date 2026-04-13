@@ -19,10 +19,17 @@ from parser.models import CanonicalClaim
 from .rules import (
     check_billing_provider_nm1,
     check_claim_balance,
+    check_diagnosis_pointers,
+    check_diagnosis_present,
+    check_dos_present,
+    check_dos_valid,
     check_hl_hierarchy,
     check_illegal_characters,
     check_invalid_segments,
+    check_npi_format,
+    check_service_lines_present,
     check_subscriber_name,
+    check_total_charge_nonzero,
 )
 
 log = logging.getLogger(__name__)
@@ -128,6 +135,15 @@ class SNIPValidator:
         for e in check_subscriber_name(claim, raw_segs_dicts):
             findings.append(_to_ve(e))
 
+        for e in check_diagnosis_present(claim, raw_segs_dicts):
+            findings.append(_to_ve(e))
+
+        for e in check_dos_present(claim, raw_segs_dicts):
+            findings.append(_to_ve(e))
+
+        for e in check_service_lines_present(claim, raw_segs_dicts):
+            findings.append(_to_ve(e))
+
         # HL hierarchy errors from parse_errors (already labelled L2)
         hl_errors = [p for p in self._parse_errors if p.get("code") == "L2-HL-HIERARCHY"]
         for e in check_hl_hierarchy(hl_errors, claim_id):
@@ -135,6 +151,18 @@ class SNIPValidator:
 
         # ---- Level 3 -------------------------------------------------------
         for e in check_claim_balance(claim):
+            findings.append(_to_ve(e))
+
+        for e in check_npi_format(claim):
+            findings.append(_to_ve(e))
+
+        for e in check_total_charge_nonzero(claim):
+            findings.append(_to_ve(e))
+
+        for e in check_dos_valid(claim):
+            findings.append(_to_ve(e))
+
+        for e in check_diagnosis_pointers(claim):
             findings.append(_to_ve(e))
 
         # Deduplicate by code + position
