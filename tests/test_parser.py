@@ -17,7 +17,10 @@ from ingestion.streamer import stream_transactions
 from parser.models import FileEnvelope, TransactionEnvelope, CanonicalClaim
 from parser.state_machine import EDI837PStateMachine
 from parser.hl_tracker import HLTracker
-from parser.segment_mapper import to_date, to_decimal, map_sv1, map_clm, map_nm1
+from parser.segment_mapper import (
+    to_date, to_decimal, map_sv1, map_clm, map_nm1,
+    map_lin, map_ctp, map_svd, map_cas, map_amt,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -488,3 +491,228 @@ class TestBatch2Features:
 
     def test_service_line_date_unchanged(self):
         assert self._c.service_lines[0].date == "2024-02-01"
+
+
+# ---------------------------------------------------------------------------
+# Batch 3 — NDC, service-line providers, adjudication, AMT, REF routing
+# ---------------------------------------------------------------------------
+
+def _parse_b3(raw: bytes):
+    """Parse batch3_features.edi and return (claims list, first claim)."""
+    all_claims = _parse_file(raw)
+    return all_claims, all_claims[0].claim
+
+
+class TestBatch3SegmentMappers:
+    """Unit tests for Batch 3 segment mapper functions."""
+
+    def test_map_lin_ndc(self):
+        els = "LIN*1*N4*12345678901".split("*")
+        result = map_lin(els)
+        assert result["qualifier"] == "N4"
+        assert result["product_id"] == "12345678901"
+
+    def test_map_lin_assigned_number(self):
+        els = "LIN*2*N4*99887766554".split("*")
+        result = map_lin(els)
+        assert result["assigned_number"] == "2"
+
+    def test_map_ctp_unit_price(self):
+        els = "CTP***0*3*ML".split("*")
+        result = map_ctp(els)
+        assert result["unit_price"] == Decimal("0")   # CTP03 = 0
+        assert result["quantity"] == "3"
+        assert result["unit"] == "ML"
+
+    def test_map_ctp_with_price(self):
+        els = "CTP***5.50*10*ML".split("*")
+        result = map_ctp(els)
+        assert result["unit_price"] == Decimal("5.50")
+        assert result["quantity"] == "10"
+        assert result["unit"] == "ML"
+
+    def test_map_svd_basic(self):
+        els = "SVD*BC001*350*HC:99213**1".split("*")
+        result = map_svd(els, ":")
+        assert result["payer_id"] == "BC001"
+        assert result["paid_amount"] == Decimal("350")
+        assert result["procedure_code"] == "99213"
+        assert result["paid_units"] == "1"
+
+    def test_map_cas_single(self):
+        els = "CAS*CO*45*150".split("*")
+        result = map_cas(els)
+        assert len(result) == 1
+        assert result[0]["group_code"] == "CO"
+        assert result[0]["reason_code"] == "45"
+        assert result[0]["amount"] == Decimal("150")
+
+    def test_map_cas_multiple_triplets(self):
+        els = "CAS*PR*1*50**2*75".split("*")
+        result = map_cas(els)
+        assert len(result) == 2
+        assert result[0]["reason_code"] == "1"
+        assert result[0]["amount"] == Decimal("50")
+        assert result[1]["reason_code"] == "2"
+        assert result[1]["amount"] == Decimal("75")
+
+    def test_map_cas_empty_stops(self):
+        els = "CAS*CO*45*100".split("*")
+        result = map_cas(els)
+        assert len(result) == 1
+
+    def test_map_amt_basic(self):
+        els = "AMT*F3*50".split("*")
+        result = map_amt(els)
+        assert result["qualifier"] == "F3"
+        assert result["amount"] == Decimal("50")
+
+    def test_map_amt_zero(self):
+        els = "AMT*A8*0".split("*")
+        result = map_amt(els)
+        assert result["amount"] == Decimal("0")
+
+
+class TestBatch3Features:
+    """Integration tests using batch3_features.edi."""
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, batch3_features_bytes):
+        self._all, self._c = _parse_b3(batch3_features_bytes)
+
+    # ── Claim-level AMT ─────────────────────────────────────────────────
+
+    def test_claim_amt_f3_patient_paid(self):
+        assert "F3" in self._c.amounts
+        assert self._c.amounts["F3"] == Decimal("50")
+
+    def test_claim_amt_not_on_service_line(self):
+        sl = self._c.service_lines[0]
+        assert "F3" not in sl.amounts
+
+    # ── NDC (2410 LIN/CTP) ──────────────────────────────────────────────
+
+    def test_ndc_populated(self):
+        sl = self._c.service_lines[0]
+        assert sl.ndc == "12345678901"
+
+    def test_ndc_quantity(self):
+        sl = self._c.service_lines[0]
+        assert sl.ndc_quantity == "3"
+
+    def test_ndc_unit(self):
+        sl = self._c.service_lines[0]
+        assert sl.ndc_unit == "ML"
+
+    # ── Service-line REF routing (2400 scope) ───────────────────────────
+
+    def test_sl_ref_stored_on_service_line(self):
+        sl = self._c.service_lines[0]
+        assert sl.line_refs.get("6R") == "SL-REF-001"
+
+    def test_sl_ref_not_on_claim(self):
+        assert self._c.referral_number == ""
+        assert "6R" not in self._c.ref_extras
+
+    # ── Service-line providers (2420) ───────────────────────────────────
+
+    def test_line_provider_present(self):
+        sl = self._c.service_lines[0]
+        assert len(sl.line_providers) == 1
+
+    def test_line_provider_qualifier(self):
+        sl = self._c.service_lines[0]
+        assert sl.line_providers[0].qualifier == "82"
+
+    def test_line_provider_npi(self):
+        sl = self._c.service_lines[0]
+        assert sl.line_providers[0].npi == "5678901234"
+
+    def test_line_provider_last_name(self):
+        sl = self._c.service_lines[0]
+        assert sl.line_providers[0].last_name == "JONES"
+
+    def test_claim_rendering_not_overwritten(self):
+        # NM1*82 after LX must NOT overwrite claim.rendering_provider
+        assert self._c.rendering_provider is None
+
+    # ── Adjudication (2430 SVD/CAS/DTP) ─────────────────────────────────
+
+    def test_adjudication_count(self):
+        sl = self._c.service_lines[0]
+        assert len(sl.adjudications) == 1
+
+    def test_adjudication_payer_id(self):
+        adj = self._c.service_lines[0].adjudications[0]
+        assert adj.payer_id == "BC001"
+
+    def test_adjudication_paid_amount(self):
+        adj = self._c.service_lines[0].adjudications[0]
+        assert adj.paid_amount == Decimal("350")
+
+    def test_adjudication_procedure_code(self):
+        adj = self._c.service_lines[0].adjudications[0]
+        assert adj.procedure_code == "99213"
+
+    def test_adjudication_paid_units(self):
+        adj = self._c.service_lines[0].adjudications[0]
+        assert adj.paid_units == "1"
+
+    def test_adjudication_paid_date(self):
+        adj = self._c.service_lines[0].adjudications[0]
+        assert adj.paid_date == "2024-03-15"
+
+    def test_adjudication_adjustment_count(self):
+        adj = self._c.service_lines[0].adjudications[0]
+        assert len(adj.adjustments) == 1
+
+    def test_adjustment_group_code(self):
+        a = self._c.service_lines[0].adjudications[0].adjustments[0]
+        assert a.group_code == "CO"
+
+    def test_adjustment_reason_code(self):
+        a = self._c.service_lines[0].adjudications[0].adjustments[0]
+        assert a.reason_code == "45"
+
+    def test_adjustment_amount(self):
+        a = self._c.service_lines[0].adjudications[0].adjustments[0]
+        assert a.amount == Decimal("150")
+
+    # ── to_dict completeness ─────────────────────────────────────────────
+
+    def test_to_dict_amounts_in_claim(self):
+        d = self._all[0].to_dict()["claim"]
+        assert d["amounts"]["F3"] == Decimal("50")
+
+    def test_to_dict_ndc_in_service_line(self):
+        d = self._all[0].to_dict()["claim"]
+        sl = d["service_lines"][0]
+        assert sl["ndc"] == "12345678901"
+        assert sl["ndc_unit"] == "ML"
+
+    def test_to_dict_line_refs(self):
+        d = self._all[0].to_dict()["claim"]
+        assert d["service_lines"][0]["line_refs"]["6R"] == "SL-REF-001"
+
+    def test_to_dict_line_providers(self):
+        d = self._all[0].to_dict()["claim"]
+        assert len(d["service_lines"][0]["line_providers"]) == 1
+        assert d["service_lines"][0]["line_providers"][0]["npi"] == "5678901234"
+
+    def test_to_dict_adjudications(self):
+        d = self._all[0].to_dict()["claim"]
+        adjs = d["service_lines"][0]["adjudications"]
+        assert len(adjs) == 1
+        assert adjs[0]["paid_amount"] == Decimal("350")
+        assert adjs[0]["adjustments"][0]["group_code"] == "CO"
+
+    # ── No regression: Batch 1 + 2 fields still work ────────────────────
+
+    def test_diagnosis_codes_present(self):
+        assert any(d["code"] == "J06.9" for d in self._c.diagnosis_codes)
+
+    def test_service_line_procedure_code(self):
+        assert self._c.service_lines[0].procedure_code == "99213"
+
+    def test_service_line_charge(self):
+        assert self._c.service_lines[0].charge == Decimal("600")

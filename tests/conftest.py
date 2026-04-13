@@ -82,6 +82,11 @@ def batch2_features_bytes():
 
 
 @pytest.fixture
+def batch3_features_bytes():
+    return fixture_bytes("batch3_features.edi")
+
+
+@pytest.fixture
 def large_file_bytes():
     """Generate a ~5MB valid EDI file programmatically for streaming tests."""
     base = fixture_bytes("valid_single.edi").decode("utf-8")

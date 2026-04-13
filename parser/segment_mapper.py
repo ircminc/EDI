@@ -173,6 +173,79 @@ def map_pat(els: list[str]) -> dict[str, str]:
     return {"relationship_code": _e(els, 1)}
 
 
+def map_lin(els: list[str]) -> dict[str, str]:
+    """LIN — Drug Identification (2410).
+
+    LIN01 = assigned number, LIN02 = product/service ID qualifier (N4=NDC),
+    LIN03 = product/service ID.
+    """
+    return {
+        "assigned_number": _e(els, 1),
+        "qualifier": _e(els, 2),
+        "product_id": _e(els, 3),
+    }
+
+
+def map_ctp(els: list[str]) -> dict[str, Any]:
+    """CTP — Drug Pricing (2410).
+
+    CTP03 = unit price, CTP04 = quantity, CTP05 = unit of measure.
+    """
+    return {
+        "unit_price": to_decimal(_e(els, 3)),
+        "quantity": _e(els, 4),
+        "unit": _e(els, 5),
+    }
+
+
+def map_svd(els: list[str], comp: str) -> dict[str, Any]:
+    """SVD — Service Line Adjudication (2430).
+
+    SVD01 = payer ID, SVD02 = paid amount, SVD03 = procedure composite,
+    SVD05 = paid units.
+    """
+    proc_parts = _e(els, 3).split(comp)
+    return {
+        "payer_id": _e(els, 1),
+        "paid_amount": to_decimal(_e(els, 2)),
+        "procedure_code": proc_parts[1] if len(proc_parts) > 1 else "",
+        "paid_units": _e(els, 5),
+    }
+
+
+def map_cas(els: list[str]) -> list[dict[str, Any]]:
+    """CAS — Claim Adjustment (2430).
+
+    CAS01 = group code; then up to 6 triplets of (reason_code, amount, qty)
+    starting at element 2.
+    """
+    group_code = _e(els, 1)
+    adjustments = []
+    for offset in range(6):
+        base = 2 + offset * 3
+        reason = _e(els, base)
+        if not reason:
+            break
+        adjustments.append({
+            "group_code": group_code,
+            "reason_code": reason,
+            "amount": to_decimal(_e(els, base + 1)),
+            "quantity": _e(els, base + 2),
+        })
+    return adjustments
+
+
+def map_amt(els: list[str]) -> dict[str, Any]:
+    """AMT — Monetary Amount (2300 or 2400).
+
+    AMT01 = qualifier, AMT02 = amount.
+    """
+    return {
+        "qualifier": _e(els, 1),
+        "amount": to_decimal(_e(els, 2)),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

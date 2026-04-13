@@ -92,6 +92,26 @@ class Patient:
 
 
 @dataclass
+class Adjustment:
+    """One CAS element group: group_code + reason_code + amount [+ quantity]."""
+    group_code: str = ""        # CAS01: PR/CO/OA/PI/CR
+    reason_code: str = ""       # CAS02/05/08...
+    amount: Decimal = field(default_factory=lambda: Decimal("0"))
+    quantity: str = ""          # CAS04/07/10... (optional)
+
+
+@dataclass
+class Adjudication:
+    """One 2430 loop: SVD + CAS(s) + DTP*573."""
+    payer_id: str = ""          # SVD01
+    paid_amount: Decimal = field(default_factory=lambda: Decimal("0"))  # SVD02
+    procedure_code: str = ""    # SVD03 composite element 2
+    paid_units: str = ""        # SVD05
+    paid_date: str = ""         # DTP*573
+    adjustments: list[Adjustment] = field(default_factory=list)
+
+
+@dataclass
 class ServiceLine:
     line_number: int = 0
     procedure_code: str = ""
@@ -105,7 +125,14 @@ class ServiceLine:
     diagnosis_pointers: list[str] = field(default_factory=list)
     date: str = ""
     place_of_service: str = ""
-    ndc: str = ""
+    ndc: str = ""               # LIN*N4 product/service ID
+    ndc_unit_price: Decimal = field(default_factory=lambda: Decimal("0"))  # CTP03
+    ndc_quantity: str = ""      # CTP04
+    ndc_unit: str = ""          # CTP05 (unit of measure: ML, GR, UN, etc.)
+    line_refs: dict = field(default_factory=dict)       # 2400 REF segments
+    amounts: dict = field(default_factory=dict)         # 2400 AMT qualifier → Decimal
+    line_providers: list[Provider] = field(default_factory=list)  # 2420 NM1 variants
+    adjudications: list[Adjudication] = field(default_factory=list)  # 2430 loops
 
 
 @dataclass
@@ -148,6 +175,8 @@ class Claim:
     supervising_provider: Optional[Provider] = None     # 2310F NM1*DQ
     ordered_provider: Optional[Provider] = None         # 2310C NM1*DK
     purchased_service_provider: Optional[Provider] = None  # 2310B NM1*P3
+
+    amounts: dict = field(default_factory=dict)           # 2300 AMT qualifier → Decimal
 
     subscriber: Subscriber = field(default_factory=Subscriber)
     patient: Optional[Patient] = None
@@ -299,6 +328,7 @@ class CanonicalClaim:
                     "zip_code":          c.patient.zip_code,
                     "relationship_code": c.patient.relationship_code,
                 } if c.patient else None,
+                "amounts": c.amounts,
                 "service_lines": [
                     {
                         "line_number":       sl.line_number,
@@ -314,6 +344,31 @@ class CanonicalClaim:
                         "date":              sl.date,
                         "place_of_service":  sl.place_of_service,
                         "ndc":               sl.ndc,
+                        "ndc_unit_price":    sl.ndc_unit_price,
+                        "ndc_quantity":      sl.ndc_quantity,
+                        "ndc_unit":          sl.ndc_unit,
+                        "line_refs":         sl.line_refs,
+                        "amounts":           sl.amounts,
+                        "line_providers":    [_provider_dict(p) for p in sl.line_providers],
+                        "adjudications": [
+                            {
+                                "payer_id":      adj.payer_id,
+                                "paid_amount":   adj.paid_amount,
+                                "procedure_code": adj.procedure_code,
+                                "paid_units":    adj.paid_units,
+                                "paid_date":     adj.paid_date,
+                                "adjustments": [
+                                    {
+                                        "group_code":  a.group_code,
+                                        "reason_code": a.reason_code,
+                                        "amount":      a.amount,
+                                        "quantity":    a.quantity,
+                                    }
+                                    for a in adj.adjustments
+                                ],
+                            }
+                            for adj in sl.adjudications
+                        ],
                     }
                     for sl in c.service_lines
                 ],

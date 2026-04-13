@@ -388,6 +388,67 @@ def _render_detail(canonical: CanonicalClaim, result: ValidationResult) -> None:
                     f'</div>',
                     unsafe_allow_html=True,
                 )
+                # NDC detail (Batch 3)
+                if sl.ndc:
+                    st.markdown(
+                        f'<div style="font-size:0.78rem;margin:0 0 2px 12px;color:#a5b4fc">'
+                        f'NDC: <code>{sl.ndc}</code>'
+                        + (f' &nbsp;·&nbsp; {sl.ndc_quantity} {sl.ndc_unit}' if sl.ndc_quantity else "") +
+                        f'</div>',
+                        unsafe_allow_html=True,
+                    )
+                # Line-level REF (Batch 3)
+                if sl.line_refs:
+                    refs_str = " &nbsp;|&nbsp; ".join(
+                        f'<code>{q}</code>: {v}' for q, v in sl.line_refs.items()
+                    )
+                    st.markdown(
+                        f'<div style="font-size:0.78rem;margin:0 0 2px 12px;color:#9ca3af">'
+                        f'REF: {refs_str}</div>',
+                        unsafe_allow_html=True,
+                    )
+                # Line-level AMT (Batch 3)
+                if sl.amounts:
+                    amts_str = " &nbsp;|&nbsp; ".join(
+                        f'<code>{q}</code>: ${v:,.2f}' for q, v in sl.amounts.items()
+                    )
+                    st.markdown(
+                        f'<div style="font-size:0.78rem;margin:0 0 2px 12px;color:#9ca3af">'
+                        f'AMT: {amts_str}</div>',
+                        unsafe_allow_html=True,
+                    )
+                # Service-line providers (2420, Batch 3)
+                for lp in sl.line_providers:
+                    lp_name = " ".join(filter(None, [lp.last_name, lp.first_name])).title()
+                    st.markdown(
+                        f'<div style="font-size:0.78rem;margin:0 0 2px 12px;color:#6ee7b7">'
+                        f'Provider ({lp.qualifier}): {lp_name or "—"} &nbsp;·&nbsp; NPI: {lp.npi or "—"}'
+                        f'</div>',
+                        unsafe_allow_html=True,
+                    )
+                # Adjudication (2430, Batch 3)
+                for adj in sl.adjudications:
+                    adj_line = (
+                        f'Adj [{adj.payer_id}]: paid ${adj.paid_amount:,.2f}'
+                        + (f' on {adj.paid_date}' if adj.paid_date else "")
+                    )
+                    if adj.adjustments:
+                        adj_parts = ", ".join(
+                            f'{a.group_code}/{a.reason_code} ${a.amount:,.2f}'
+                            for a in adj.adjustments
+                        )
+                        adj_line += f' &nbsp;·&nbsp; CAS: {adj_parts}'
+                    st.markdown(
+                        f'<div style="font-size:0.78rem;margin:0 0 2px 12px;color:#fbbf24">'
+                        f'{adj_line}</div>',
+                        unsafe_allow_html=True,
+                    )
+
+        # Claim-level AMT (Batch 3)
+        if c.amounts:
+            st.markdown("**Financial Amounts**")
+            for qual, amt in c.amounts.items():
+                _kv(f"AMT*{qual}", f"${amt:,.2f}")
 
     # ── Tab 1: Validation Errors ────────────────────────────────────────────
     with tab1:

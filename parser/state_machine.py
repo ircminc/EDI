@@ -35,6 +35,8 @@ from typing import Optional
 
 from .hl_tracker import HLTracker
 from .models import (
+    Adjudication,
+    Adjustment,
     BillingProvider,
     CanonicalClaim,
     Claim,
@@ -48,10 +50,14 @@ from .models import (
 )
 from .segment_mapper import (
     check_illegal_chars,
+    map_amt,
+    map_cas,
     map_clm,
+    map_ctp,
     map_dmg,
     map_dtp,
     map_hi,
+    map_lin,
     map_lx,
     map_n3,
     map_n4,
@@ -61,6 +67,7 @@ from .segment_mapper import (
     map_ref,
     map_sbr,
     map_sv1,
+    map_svd,
 )
 
 log = logging.getLogger(__name__)
@@ -87,6 +94,9 @@ class Loop(str, Enum):
     L2310F  = "2310F"    # Supervising Provider (DQ)
     L2310   = "2310"     # Unknown 2310 sub-loop
     L2400   = "2400"
+    L2410   = "2410"     # Drug Identification (LIN/CTP)
+    L2420   = "2420"     # Service Line Provider (NM1 in service-line scope)
+    L2430   = "2430"     # Line Adjudication (SVD/CAS)
     UNKNOWN = "UNKNOWN"
 
 
@@ -145,6 +155,7 @@ class EDI837PStateMachine:
         self._current_claim: Optional[Claim] = None
         self._current_lx: int = 0
         self._current_sl: Optional[ServiceLine] = None
+        self._current_adj: Optional[Adjudication] = None
 
         # ── Output ────────────────────────────────────────────────────────
         self._claims: list[CanonicalClaim] = []
@@ -287,6 +298,22 @@ class EDI837PStateMachine:
             self._loop = Loop.L2400
             self._record_raw(raw, pos, Loop.L2400)
 
+        elif seg_id == "LIN":
+            if self._current_sl is not None:
+                data = map_lin(els)
+                if data["qualifier"] == "N4":
+                    self._current_sl.ndc = data["product_id"]
+                self._loop = Loop.L2410
+                self._record_raw(raw, pos, Loop.L2410)
+
+        elif seg_id == "CTP":
+            if self._current_sl is not None:
+                data = map_ctp(els)
+                self._current_sl.ndc_unit_price = data["unit_price"]
+                self._current_sl.ndc_quantity   = data["quantity"]
+                self._current_sl.ndc_unit       = data["unit"]
+                self._record_raw(raw, pos, Loop.L2410)
+
         elif seg_id == "SV1":
             if self._current_sl is not None:
                 data = map_sv1(els, cd)
@@ -301,11 +328,48 @@ class EDI837PStateMachine:
                 self._current_sl.diagnosis_pointers = data["diagnosis_pointers"]
                 self._record_raw(raw, pos, Loop.L2400)
 
+        elif seg_id == "SVD":
+            if self._current_sl is not None:
+                self._finalize_adjudication()
+                data = map_svd(els, cd)
+                self._current_adj = Adjudication(
+                    payer_id       = data["payer_id"],
+                    paid_amount    = data["paid_amount"],
+                    procedure_code = data["procedure_code"],
+                    paid_units     = data["paid_units"],
+                )
+                self._loop = Loop.L2430
+                self._record_raw(raw, pos, Loop.L2430)
+
+        elif seg_id == "CAS":
+            if self._current_adj is not None:
+                for adj_data in map_cas(els):
+                    self._current_adj.adjustments.append(Adjustment(
+                        group_code  = adj_data["group_code"],
+                        reason_code = adj_data["reason_code"],
+                        amount      = adj_data["amount"],
+                        quantity    = adj_data["quantity"],
+                    ))
+                self._record_raw(raw, pos, Loop.L2430)
+
+        elif seg_id == "AMT":
+            data = map_amt(els)
+            qualifier = data["qualifier"]
+            amount    = data["amount"]
+            if self._current_sl is not None:
+                self._current_sl.amounts[qualifier] = amount
+            elif self._current_claim is not None:
+                self._current_claim.amounts[qualifier] = amount
+            self._record_raw(raw, pos, self._loop)
+
         elif seg_id == "DTP":
             data      = map_dtp(els)
             qualifier = data["qualifier"]
             date_val  = data["date"]
-            if self._current_sl is not None and qualifier == "472":
+            if self._current_adj is not None and qualifier == "573":
+                # 2430 adjudication payment date
+                self._current_adj.paid_date = date_val
+            elif self._current_sl is not None and qualifier == "472":
                 self._current_sl.date = date_val
             elif self._current_claim is not None and self._current_sl is None:
                 if qualifier == "472":
@@ -400,9 +464,7 @@ class EDI837PStateMachine:
                     self._current_claim.patient.middle_name = data["middle_name"]
 
         elif qualifier in _NM1_PROVIDER_MAP:
-            # 2310 sub-loop provider (rendering, referring, service facility, etc.)
             loop_enum, claim_attr = _NM1_PROVIDER_MAP[qualifier]
-            self._loop = loop_enum
             prov = Provider(
                 qualifier    = qualifier,
                 entity_type  = data["entity_type"],
@@ -414,8 +476,14 @@ class EDI837PStateMachine:
                 npi          = data["id_code"] if data["id_qualifier"] == "XX" else "",
             )
             self._active_provider = prov
-            if self._current_claim is not None:
+            if self._current_sl is not None:
+                # 2420 scope: append to service-line providers, not claim-level
+                self._current_sl.line_providers.append(prov)
+                self._loop = Loop.L2420
+            elif self._current_claim is not None:
+                # 2310 scope: set on claim
                 setattr(self._current_claim, claim_attr, prov)
+                self._loop = loop_enum
 
         else:
             self._loop = Loop.L2310
@@ -554,6 +622,11 @@ class EDI837PStateMachine:
             self._subscriber.group_number = value
             return
 
+        # 2400 scope: REF belongs to the service line, not the claim
+        if self._current_sl is not None:
+            self._current_sl.line_refs[qualifier] = value
+            return
+
         if self._current_claim is not None:
             attr = self._CLAIM_REF_MAP.get(qualifier)
             if attr:
@@ -583,7 +656,13 @@ class EDI837PStateMachine:
     # Service line finalization
     # ------------------------------------------------------------------
 
+    def _finalize_adjudication(self) -> None:
+        if self._current_adj is not None and self._current_sl is not None:
+            self._current_sl.adjudications.append(self._current_adj)
+            self._current_adj = None
+
     def _finalize_service_line(self) -> None:
+        self._finalize_adjudication()
         if self._current_sl is not None and self._current_claim is not None:
             self._current_claim.service_lines.append(self._current_sl)
             self._current_sl = None
