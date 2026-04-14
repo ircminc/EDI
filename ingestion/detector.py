@@ -1,17 +1,23 @@
 """
 Delimiter detection from the ISA segment.
 
-The ISA segment is exactly 106 characters (including the segment terminator).
-All positions are fixed per ASC X12 005010 spec:
+Per ASC X12 005010 spec the ISA segment is exactly 106 characters when all
+fields are padded to their fixed widths.  In practice many trading partners
+omit the padding, so we derive delimiters two ways:
 
-  Position 3   → element delimiter    (e.g. '*')
-  Position 104  → component separator  (e.g. ':')
-  Position 105  → segment terminator   (e.g. '~')
+Primary (split-based, works for padded AND unpadded ISA):
+  - Element delimiter  → raw[3]  (always position 3 — immediately after "ISA")
+  - Split raw on element delimiter with a limit of 16 to get 17 parts.
+    parts[16] = ISA16_char + segment_terminator + rest_of_file
+    → component separator = parts[16][0]
+    → segment terminator  = parts[16][1]
+  - Repetition separator → parts[11][0]  (ISA11 field)
 
-ISA06 (sender ID)   → positions 35-49  (15 chars, right-padded with spaces)
-ISA08 (receiver ID) → positions 54-68  (15 chars, right-padded with spaces)
-ISA13 (control num) → positions 90-98  (9 chars)
-ISA15 (usage ind.)  → position 102     ('P'=Production, 'T'=Test)
+Fallback for field extraction (uses fixed positions — only valid for padded ISA):
+  ISA06 (sender ID)   → positions 35-49  (15 chars)
+  ISA08 (receiver ID) → positions 54-68  (15 chars)
+  ISA13 (control num) → positions 90-98  (9 chars)
+  ISA15 (usage ind.)  → position 102
 """
 
 from __future__ import annotations
@@ -35,7 +41,10 @@ class DelimiterSet:
 
 def detect_delimiters(raw: str) -> DelimiterSet:
     """
-    Extract delimiters from the first 106 characters of the ISA segment.
+    Extract delimiters from the ISA segment using element-delimiter splitting.
+
+    Works correctly for both spec-compliant (padded) ISA segments and
+    non-padded ISA segments produced by some trading partners.
 
     Parameters
     ----------
@@ -46,7 +55,8 @@ def detect_delimiters(raw: str) -> DelimiterSet:
     Raises
     ------
     ValueError
-        If the content does not begin with 'ISA' or is shorter than 106 chars.
+        If the content does not begin with 'ISA', is too short, or has
+        fewer than 16 element delimiters in the ISA segment.
     """
     if len(raw) < ISA_LENGTH:
         raise ValueError(
@@ -59,10 +69,38 @@ def detect_delimiters(raw: str) -> DelimiterSet:
             f"Content does not begin with 'ISA'. Got: {raw[:3]!r}"
         )
 
+    # Position 3 is always the element delimiter — "ISA" is fixed at positions 0-2.
     element_delim = raw[3]
-    repetition_sep = raw[82]   # ISA11 — repetition separator in 005010
-    component_sep = raw[104]   # ISA16
-    segment_term = raw[105]    # segment terminator
+
+    # Split on element delimiter exactly 16 times to isolate the 17 ISA fields.
+    # parts[0]  = "ISA"
+    # parts[1]  = ISA01 (auth info qualifier)
+    # ...
+    # parts[11] = ISA11 (repetition separator — one character)
+    # ...
+    # parts[16] = ISA16_char + segment_terminator + rest_of_file
+    parts = raw.split(element_delim, 16)
+    if len(parts) < 17:
+        raise ValueError(
+            f"ISA segment appears malformed: fewer than 16 '{element_delim}' "
+            f"element delimiters found in the first segment."
+        )
+
+    # ISA11 — repetition separator (single-character field)
+    repetition_sep = parts[11][0] if parts[11] else "^"
+
+    # ISA16 (component separator) is the first character of parts[16].
+    # The segment terminator immediately follows it.
+    isa16_tail = parts[16]
+    component_sep = isa16_tail[0] if isa16_tail else ":"
+    segment_term = isa16_tail[1] if len(isa16_tail) > 1 else "~"
+
+    if segment_term.isalnum() or segment_term == " ":
+        log.warning(
+            "Segment terminator resolved to %r (hex %02X) — "
+            "this is unusual and may indicate a malformed ISA segment.",
+            segment_term, ord(segment_term),
+        )
 
     delimiters = DelimiterSet(
         element=element_delim,

@@ -11,6 +11,7 @@ Features:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sys
@@ -56,6 +57,61 @@ st.set_page_config(
 )
 
 # ---------------------------------------------------------------------------
+# Authentication gate
+# ---------------------------------------------------------------------------
+# SHA-256 of the access password — never store the plaintext.
+_ACCESS_HASH = "659439c7eb3369a7c308dfdca809f08c5aea6b44e12ac508f4660ad3c39ff648"
+
+
+def _verify_password(pwd: str) -> bool:
+    return hashlib.sha256(pwd.encode()).hexdigest() == _ACCESS_HASH
+
+
+if "authenticated" not in st.session_state:
+    st.session_state.authenticated = False
+
+if not st.session_state.authenticated:
+    st.markdown(
+        """
+        <style>
+        /* Hide the default sidebar and header while on the login screen */
+        [data-testid="stSidebar"] { display: none; }
+        [data-testid="stHeader"]  { display: none; }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+    _col_l, _col_c, _col_r = st.columns([1, 1.4, 1])
+    with _col_c:
+        st.markdown("<br><br>", unsafe_allow_html=True)
+        st.markdown(
+            '<div style="text-align:center;font-size:2.2rem;margin-bottom:4px">🏥</div>'
+            '<h2 style="text-align:center;margin-bottom:2px">EDI 837P System</h2>'
+            '<p style="text-align:center;color:#9ca3af;font-size:0.9rem;margin-bottom:24px">'
+            'Enter your access password to continue</p>',
+            unsafe_allow_html=True,
+        )
+        _pwd_input = st.text_input(
+            "Password",
+            type="password",
+            placeholder="Enter password…",
+            label_visibility="collapsed",
+        )
+        _login_btn = st.button("Unlock", type="primary", use_container_width=True)
+
+        if _login_btn or (_pwd_input and st.session_state.get("_pwd_enter")):
+            if _verify_password(_pwd_input):
+                st.session_state.authenticated = True
+                st.rerun()
+            else:
+                st.error("Incorrect password. Please try again.")
+
+        # Allow Enter key to submit by tracking input changes
+        st.session_state["_pwd_enter"] = bool(_pwd_input)
+
+    st.stop()
+
+# ---------------------------------------------------------------------------
 # Session state defaults
 # ---------------------------------------------------------------------------
 if "results" not in st.session_state:
@@ -64,57 +120,136 @@ if "selected_row" not in st.session_state:
     st.session_state.selected_row = None
 if "file_name" not in st.session_state:
     st.session_state.file_name = ""
+if "last_diag" not in st.session_state:
+    st.session_state.last_diag = None      # _PipelineDiag from last processed file
+if "file_diags" not in st.session_state:
+    st.session_state.file_diags = {}       # file_name → _PipelineDiag
+if "batch_log" not in st.session_state:
+    st.session_state.batch_log = []        # list of log-entry dicts from last batch run
 
 # ---------------------------------------------------------------------------
-# Sidebar — Upload + DB
+# Sidebar — tabbed layout
 # ---------------------------------------------------------------------------
 st.sidebar.title("EDI 837P System")
+if st.sidebar.button("🔒 Sign Out", key="sign_out"):
+    st.session_state.authenticated = False
+    st.rerun()
 st.sidebar.markdown("---")
 
-uploaded = st.sidebar.file_uploader(
-    "Upload EDI File",
-    type=["edi", "txt"],
-    help="ASC X12N 837P (005010X222A1)",
-)
+_upload_tab, _options_tab, _log_tab = st.sidebar.tabs(["📁 Upload & Search", "⚙ Processing Options", "📋 Batch Logs"])
 
-persist_to_db = st.sidebar.checkbox(
-    "Persist to PostgreSQL",
-    value=False,
-    disabled=not _DB_AVAILABLE,
-    help="Requires PGHOST / PGUSER / PGPASSWORD / PGDATABASE env vars.",
-)
+# ── Tab 1: Upload & Search ──────────────────────────────────────────────────
+with _upload_tab:
+    uploaded_files = st.file_uploader(
+        "Upload EDI File(s)",
+        type=["edi", "txt"],
+        accept_multiple_files=True,
+        help="ASC X12N 837P (005010X222A1) — select one or more files.",
+    )
 
-lenient_mode = st.sidebar.checkbox(
-    "⚠ Allow missing IEA (lenient)",
-    value=False,
-    help=(
-        "Process files even when the IEA interchange-closing segment is absent. "
-        "Claims found inside ST–SE blocks are still fully validated. "
-        "Enable this for files from vendors that omit the envelope footer."
-    ),
-)
+    persist_to_db = st.checkbox(
+        "Persist to PostgreSQL",
+        value=False,
+        disabled=not _DB_AVAILABLE,
+        help="Requires PGHOST / PGUSER / PGPASSWORD / PGDATABASE env vars.",
+    )
 
-st.sidebar.markdown("---")
-st.sidebar.markdown("**Search**")
-search_claim = st.sidebar.text_input("Claim ID", key="search_claim")
-search_npi = st.sidebar.text_input("Billing NPI", key="search_npi")
-search_status = st.sidebar.selectbox(
-    "Status", ["All", "Pass", "Fail"], key="search_status"
-)
+    _process_clicked = st.button(
+        "▶  Process Files",
+        type="primary",
+        disabled=not uploaded_files,
+    )
 
-st.sidebar.markdown("**Date of Service Range**")
-search_dos_from = st.sidebar.date_input(
-    "DOS From",
-    value=None,
-    key="search_dos_from",
-    help="Filter claims with dos_from on or after this date.",
-)
-search_dos_to = st.sidebar.date_input(
-    "DOS To",
-    value=None,
-    key="search_dos_to",
-    help="Filter claims with dos_to on or before this date.",
-)
+    st.markdown("---")
+    st.markdown("**Search**")
+    search_claim = st.text_input("Claim ID", key="search_claim")
+    search_npi = st.text_input("Billing NPI", key="search_npi")
+    search_status = st.selectbox(
+        "Status", ["All", "Pass", "Fail"], key="search_status"
+    )
+
+    st.markdown("**Date of Service Range**")
+    search_dos_from = st.date_input(
+        "DOS From",
+        value=None,
+        key="search_dos_from",
+        help="Filter claims with dos_from on or after this date.",
+    )
+    search_dos_to = st.date_input(
+        "DOS To",
+        value=None,
+        key="search_dos_to",
+        help="Filter claims with dos_to on or before this date.",
+    )
+
+# ── Tab 2: Processing Options ───────────────────────────────────────────────
+with _options_tab:
+    st.markdown("#### Envelope Processing")
+    st.info(
+        "**Truncated Interchange Envelope**  \n"
+        "Files missing the IEA closing segment are processed automatically. "
+        "A warning is logged and claims inside any ST–SE blocks are fully "
+        "extracted and validated as normal.  \n\n"
+        "**Segment Terminator Detection**  \n"
+        "The terminator is derived from the ISA element structure, not a fixed "
+        "byte offset. This handles ISA headers with non-standard field padding.",
+    )
+
+    # Show live diagnostics from the last processed file (if any)
+    _last_diag = st.session_state.get("last_diag")
+    if _last_diag is not None:
+        st.markdown("---")
+        st.markdown("#### Last File — Envelope Diagnostics")
+        st.markdown(
+            f"**Segment terminator:** `{_last_diag.seg_term!r}` "
+            f"(hex `{_last_diag.seg_term_hex}`)  \n"
+            f"**Element delimiter:** `{_last_diag.element_delim!r}` "
+            f"(hex `{_last_diag.element_delim_hex}`)  \n"
+            f"**Total segments:** {_last_diag.total_segments}  \n"
+            f"**ST–SE transactions:** {_last_diag.total_transactions}  \n"
+            f"**IEA present in file:** "
+            f"{'✅ Yes' if _last_diag.iea_in_raw else '❌ No (envelope unclosed)'}  \n"
+            f"**IEA found as clean segment ID:** "
+            f"{'✅ Yes' if _last_diag.iea_as_seg_id else '❌ No'}",
+        )
+        if _last_diag.last_segments:
+            with st.expander("Last 5 segments"):
+                for _s in _last_diag.last_segments:
+                    st.code(_s[:200])
+
+    st.markdown("---")
+    st.markdown("#### Additional Options")
+    st.caption("Future processing controls will appear here (e.g. SNIP validation level).")
+
+# ── Tab 3: Batch Logs ───────────────────────────────────────────────────────
+with _log_tab:
+    _batch_log = st.session_state.get("batch_log", [])
+    if not _batch_log:
+        st.caption("No batch processed yet. Upload files and click ▶ Process Files.")
+    else:
+        for _entry in _batch_log:
+            _icon = "✅" if _entry["success"] else "❌"
+            _fname_short = _entry["file"]
+            if len(_fname_short) > 28:
+                _fname_short = "…" + _fname_short[-25:]
+            st.markdown(
+                f'<div style="font-size:0.78rem;padding:4px 6px;margin:2px 0;'
+                f'background:rgba(255,255,255,0.04);border-radius:4px;'
+                f'border-left:3px solid {"#4ade80" if _entry["success"] else "#f87171"}">'
+                f'<span>{_icon} <b title="{_entry["file"]}">{_fname_short}</b></span><br>'
+                f'<span style="color:#9ca3af">'
+                + (f'{_entry["claims"]} claim(s)' if _entry["success"] else "")
+                + (f' &nbsp;·&nbsp; ⚠️ envelope' if _entry.get("env_warning") else "")
+                + (f' &nbsp;·&nbsp; {_entry["parse_warnings"]} parse warn' if _entry.get("parse_warnings") else "")
+                + (f' &nbsp;·&nbsp; 💾 {_entry["db_persisted"]}' if _entry.get("db_persisted") else "")
+                + (f'<br><span style="color:#f87171">{_entry["error"]}</span>' if _entry.get("error") else "")
+                + (f'<br><span style="color:#fcd34d">DB: {_entry["db_error"]}</span>' if _entry.get("db_error") else "")
+                + f'</span></div>',
+                unsafe_allow_html=True,
+            )
+        if st.button("🗑 Clear Logs", key="clear_batch_log"):
+            st.session_state.batch_log = []
+            st.rerun()
 
 # ---------------------------------------------------------------------------
 # Main area — title
@@ -131,26 +266,73 @@ def _decimal_default(obj):
     raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
 
 
+import dataclasses as _dc
+
+
+@_dc.dataclass
+class _PipelineDiag:
+    """Diagnostic metadata from a processing run."""
+    seg_term: str = ""
+    seg_term_hex: str = ""
+    element_delim: str = ""
+    element_delim_hex: str = ""
+    total_segments: int = 0
+    total_transactions: int = 0
+    last_segments: list = _dc.field(default_factory=list)
+    iea_in_raw: bool = False
+    iea_as_seg_id: bool = False
+    tx_segment_counts: list = _dc.field(default_factory=list)
+    """List of (st_control_number, segment_count) for every yielded transaction."""
+    truncation_error: str = ""
+    """Non-empty if a TruncatedFileError was caught during streaming."""
+    parse_warnings: list = _dc.field(default_factory=list)
+    """Per-transaction parse warnings collected during processing."""
+
+
 def process_file(
     raw_bytes: bytes,
     file_name: str,
-    allow_truncated: bool = False,
-) -> list[tuple[CanonicalClaim, ValidationResult]]:
-    """Full ingestion → parse → validate pipeline. Returns list of (claim, result)."""
+) -> tuple[list[tuple[CanonicalClaim, ValidationResult]], _PipelineDiag]:
+    """Full ingestion → parse → validate pipeline.
+
+    Returns
+    -------
+    (pairs, diag)
+        pairs — list of (CanonicalClaim, ValidationResult)
+        diag  — diagnostic metadata for debug display
+    """
     pairs: list[tuple[CanonicalClaim, ValidationResult]] = []
+    diag = _PipelineDiag()
 
     content = normalize_file_content(raw_bytes)
     delimiters = detect_delimiters(content)
 
-    transactions = list(stream_transactions(content, delimiters, allow_truncated=allow_truncated))
-    total_tx = len(transactions)
+    # Populate delimiter diagnostics immediately so they're available even if
+    # an exception occurs later.
+    diag.seg_term = delimiters.segment
+    diag.seg_term_hex = f"{ord(delimiters.segment):02X}"
+    diag.element_delim = delimiters.element
+    diag.element_delim_hex = f"{ord(delimiters.element):02X}"
 
-    progress = st.progress(0, text="Starting…")
-    status_box = st.empty()
-    processed = 0
+    all_segs_raw = [s.strip() for s in content.split(delimiters.segment) if s.strip()]
+    diag.total_segments = len(all_segs_raw)
+    diag.last_segments = all_segs_raw[-5:] if all_segs_raw else []
+    diag.iea_in_raw = "IEA" in content
+    diag.iea_as_seg_id = any(
+        s.split(delimiters.element)[0] == "IEA" for s in all_segs_raw
+    )
+
+    try:
+        transactions = list(stream_transactions(content, delimiters))
+    except TruncatedFileError as _te:
+        # Bypass: log the error into diagnostics, continue with whatever
+        # ST-SE blocks were yielded before the error (may be empty list).
+        diag.truncation_error = str(_te)
+        transactions = []
+    diag.total_transactions = len(transactions)
 
     for tx in transactions:
-        status_box.info(f"Processing transaction ST={tx.st_control_number}…")
+        diag.tx_segment_counts.append((tx.st_control_number, len(tx.segments)))
 
         file_env = FileEnvelope(
             file_name=file_name,
@@ -177,7 +359,9 @@ def process_file(
         try:
             claims = sm.parse(tx.segments)
         except Exception as e:
-            st.warning(f"ST={tx.st_control_number} parse error: {e} — skipping transaction.")
+            diag.parse_warnings.append(
+                f"ST={tx.st_control_number} parse error: {e} — transaction skipped."
+            )
             continue
 
         for canonical in claims:
@@ -188,54 +372,62 @@ def process_file(
             result = validator.validate(canonical)
             pairs.append((canonical, result))
 
-        processed += 1
-        pct = int(processed / total_tx * 100) if total_tx else 100
-        progress.progress(pct, text=f"Processed {processed}/{total_tx} transactions")
-
-    progress.progress(100, text="Complete")
-    status_box.success(f"Done — {len(pairs)} claim(s) extracted.")
-    return pairs
+    return pairs, diag
 
 
-if uploaded is not None and st.sidebar.button("▶  Process File", type="primary"):
+if uploaded_files and _process_clicked:
     st.session_state.results = []
     st.session_state.selected_row = None
-    st.session_state.file_name = uploaded.name
+    st.session_state.file_name = ""
+    st.session_state.file_diags = {}
+    st.session_state.batch_log = []
 
-    raw = uploaded.read()
-    try:
-        with st.spinner("Ingesting…"):
-            pairs = process_file(raw, uploaded.name, allow_truncated=lenient_mode)
-        st.session_state.results = pairs
+    _all_pairs: list = []
+    _total_files = len(uploaded_files)
 
-        if lenient_mode:
-            st.warning(
-                "⚠ **Lenient mode active** — IEA segment may be missing. "
-                "Claims were extracted from ST–SE blocks and fully validated, "
-                "but the interchange envelope was not verified."
-            )
+    for _uploaded in uploaded_files:
+        _fname = _uploaded.name
+        _log_entry: dict = {
+            "file": _fname,
+            "claims": 0,
+            "success": False,
+            "error": None,
+            "env_warning": False,
+            "parse_warnings": 0,
+            "db_persisted": None,
+            "db_error": None,
+        }
+        raw = _uploaded.read()
+        try:
+            pairs, _diag = process_file(raw, _fname)
+            _all_pairs.extend(pairs)
+            st.session_state.file_diags[_fname] = _diag
+            st.session_state.last_diag = _diag
 
-        if persist_to_db and _DB_AVAILABLE and pairs:
-            try:
-                with managed_connection() as conn:
-                    apply_schema(conn)
-                    repo = ClaimRepository(conn)
-                    ids = repo.insert_many(pairs, file_name=uploaded.name)
-                st.success(f"Persisted {len(ids)} claim(s) to PostgreSQL.")
-            except Exception as db_err:
-                st.error(f"DB persist failed: {db_err}")
+            _log_entry["success"] = True
+            _log_entry["claims"] = len(pairs)
+            _log_entry["env_warning"] = bool(_diag.truncation_error or not _diag.iea_in_raw)
+            _log_entry["parse_warnings"] = len(_diag.parse_warnings)
 
-    except TruncatedFileError as e:
-        st.error(f"File truncated (missing IEA): {e}")
-        st.info(
-            "💡 **Tip:** If your vendor produces files without the IEA closing segment, "
-            "enable **⚠ Allow missing IEA (lenient)** in the sidebar and re-process."
-        )
-    except ValueError as e:
-        st.error(f"Invalid file format: {e}")
-    except Exception as e:
-        st.error(f"Unexpected error: {e}")
-        raise
+            if persist_to_db and _DB_AVAILABLE and pairs:
+                try:
+                    with managed_connection() as conn:
+                        apply_schema(conn)
+                        repo = ClaimRepository(conn)
+                        ids = repo.insert_many(pairs, file_name=_fname)
+                    _log_entry["db_persisted"] = len(ids)
+                except Exception as db_err:
+                    _log_entry["db_error"] = str(db_err)
+
+        except ValueError as e:
+            _log_entry["error"] = f"Invalid file format: {e}"
+        except Exception as e:
+            _log_entry["error"] = f"Unexpected error: {e}"
+
+        st.session_state.batch_log.append(_log_entry)
+
+    st.session_state.results = _all_pairs
+    st.session_state.file_name = ", ".join(f.name for f in uploaded_files)
 
 # ---------------------------------------------------------------------------
 # Display helpers
@@ -320,8 +512,8 @@ def _kv(label: str, value: str) -> None:
 def _render_detail(canonical: CanonicalClaim, result: ValidationResult) -> None:
     """Inline detail panel rendered below a row."""
     c = canonical.claim
-    tab0, tab1, tab2, tab3 = st.tabs(
-        ["Claim Info", "Validation Errors", "Raw Segments", "Full Payload"]
+    tab0, tab1, tab2, tab3, tab4 = st.tabs(
+        ["Claim Info", "Validation Errors", "Raw Segments", "Full Payload", "Processing Review"]
     )
 
     # ── Tab 0: Claim Info ───────────────────────────────────────────────────
@@ -549,6 +741,97 @@ def _render_detail(canonical: CanonicalClaim, result: ValidationResult) -> None:
     with tab3:
         payload = canonical.to_dict()
         st.json(json.dumps(payload, default=_decimal_default, indent=2))
+
+    # ── Tab 4: Processing Review ────────────────────────────────────────────
+    with tab4:
+        # Resolve the diag for this specific claim's source file
+        _file_diags = st.session_state.get("file_diags", {})
+        _claim_file = canonical.file.file_name if canonical.file else ""
+        _diag = _file_diags.get(_claim_file) or st.session_state.get("last_diag")
+
+        # ── Accordion 1: Envelope Status (IEA / Truncation) ───────────────
+        _iea_missing   = _diag is not None and not _diag.iea_in_raw
+        _iea_malformed = (
+            _diag is not None
+            and _diag.iea_in_raw
+            and not _diag.iea_as_seg_id
+        )
+        _envelope_ok   = _diag is not None and _diag.iea_as_seg_id
+        _trunc_caught  = _diag is not None and bool(_diag.truncation_error)
+
+        if _trunc_caught or _iea_missing:
+            _env_label = "⚠️  Truncated Envelope — IEA Segment Absent"
+        elif _iea_malformed:
+            _env_label = "⚠️  Envelope Warning — IEA Detected but Not Parsed"
+        else:
+            _env_label = "✅  Envelope Intact — IEA Segment Found"
+
+        _expand_env = _trunc_caught or _iea_missing or _iea_malformed
+        with st.expander(_env_label, expanded=_expand_env):
+            if _diag is None:
+                st.info("No file has been processed yet in this session.")
+            else:
+                col_a, col_b = st.columns(2)
+                col_a.markdown(
+                    f"**Segment terminator:** `{_diag.seg_term!r}` "
+                    f"(hex `{_diag.seg_term_hex}`)"
+                )
+                col_b.markdown(
+                    f"**Element delimiter:** `{_diag.element_delim!r}` "
+                    f"(hex `{_diag.element_delim_hex}`)"
+                )
+                st.markdown(
+                    f"**Total segments:** {_diag.total_segments}  \n"
+                    f"**ST–SE transactions:** {_diag.total_transactions}"
+                )
+                st.markdown("---")
+                if _trunc_caught:
+                    st.warning(
+                        f"**Truncated envelope detected and bypassed.**  \n"
+                        f"The IEA interchange-closing segment was not found. "
+                        f"Processing continued and any valid claims inside "
+                        f"ST–SE blocks were extracted normally.  \n\n"
+                        f"**Detail:** `{_diag.truncation_error}`"
+                    )
+                elif _envelope_ok:
+                    st.success(
+                        "Envelope is intact. IEA segment was found and parsed "
+                        "correctly as the interchange closing segment."
+                    )
+                elif _iea_malformed:
+                    st.warning(
+                        "IEA text is present in the raw file but was not found "
+                        "as a clean segment ID after splitting. The ISA header "
+                        "may use non-standard field padding."
+                    )
+                else:
+                    st.warning(
+                        "IEA segment is absent. The interchange envelope was not "
+                        "closed. Claims were still extracted and validated normally."
+                    )
+                if _diag.last_segments:
+                    with st.expander("Last 5 segments from file"):
+                        for _s in _diag.last_segments:
+                            st.code(_s[:200], language="text")
+
+        st.markdown("")
+
+        # ── Accordion 2: Lenient Mode ──────────────────────────────────────
+        with st.expander("✅  Lenient Mode — Always Active", expanded=False):
+            st.success(
+                "**Lenient Mode is permanently active.**  \n"
+                "Files with a missing or malformed IEA interchange-closing segment "
+                "are always accepted. Claims inside ST–SE blocks are fully extracted "
+                "and validated regardless of envelope status. This behaviour cannot "
+                "be disabled — envelope issues are informational only."
+            )
+            st.markdown(
+                "**What this means:**\n"
+                "- Missing IEA → warning logged, claims still extracted\n"
+                "- Malformed ISA header → segment terminator auto-detected from "
+                "element structure, not fixed byte offset\n"
+                "- Envelope integrity errors → shown here, never block processing"
+            )
 
 
 # ---------------------------------------------------------------------------

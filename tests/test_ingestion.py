@@ -15,7 +15,7 @@ from ingestion.detector import detect_delimiters, extract_isa_fields, DelimiterS
 from ingestion.integrity import (
     validate_envelope,
     validate_transaction_counts,
-    TruncatedFileError,
+    TruncatedFileError,   # still used by TestEnvelopeIntegrity.test_missing_iea_raises_truncated
     EnvelopeError,
 )
 from ingestion.streamer import stream_transactions, TransactionBlock
@@ -61,6 +61,32 @@ class TestDelimiterDetection:
         crlf = valid_single_bytes.replace(b"\n", b"\r\n")
         content = normalize_file_content(crlf)
         assert "\r" not in content
+
+    def test_unpadded_isa_detects_correct_segment_terminator(self):
+        """Segment terminator must be detected correctly even when ISA fields
+        are not padded to their fixed widths (non-standard but real-world)."""
+        # Build an ISA where sender/receiver IDs are NOT padded to 15 chars.
+        # Fixed-position read (raw[105]) would land on a wrong character;
+        # split-based detection must still resolve '~' correctly.
+        isa = (
+            "ISA*00*          *00*          "
+            "*ZZ*SHORT"           # ISA05+ISA06 — sender ID only 5 chars, not padded
+            "*ZZ*ALSOSHORT"       # ISA07+ISA08 — receiver ID only 8 chars
+            "*240101*1200*^*00501*000000001*0*T*:~"
+        )
+        # Pad to minimum length requirement with a dummy GS segment after ISA
+        content = isa + "GS*HC*SHORT*ALSOSHORT*240101*1200*1*X*005010X222A1~"
+        d = detect_delimiters(content)
+        assert d.element == "*"
+        assert d.segment == "~"
+        assert d.component == ":"
+        assert d.repetition == "^"
+
+    def test_fewer_than_16_element_delimiters_raises(self):
+        """ISA with too few element delimiters must raise ValueError."""
+        bad = "ISA*00*only*three*fields" + "X" * 82
+        with pytest.raises(ValueError, match="malformed|fewer than 16"):
+            detect_delimiters(bad)
 
 
 # ---------------------------------------------------------------------------
@@ -126,11 +152,13 @@ class TestStreaming:
         blocks = list(stream_transactions(content, d))
         assert len(blocks) == 2
 
-    def test_missing_iea_raises(self, missing_iea_bytes):
+    def test_missing_iea_does_not_raise(self, missing_iea_bytes):
+        """Missing IEA is now a warning, not a fatal error."""
         content = normalize_file_content(missing_iea_bytes)
         d = detect_delimiters(content)
-        with pytest.raises(TruncatedFileError):
-            list(stream_transactions(content, d))
+        # Must complete without raising
+        blocks = list(stream_transactions(content, d))
+        assert len(blocks) >= 1
 
     def test_block_has_sender_receiver(self, valid_single_bytes):
         content = normalize_file_content(valid_single_bytes)
@@ -154,37 +182,18 @@ class TestStreaming:
         assert peak < 200 * 1024 * 1024, f"Peak memory {peak/1024/1024:.1f} MB exceeded 200 MB"
         assert count >= 1
 
-    def test_missing_iea_lenient_mode_does_not_raise(self, missing_iea_bytes):
-        """allow_truncated=True must not raise TruncatedFileError."""
+    def test_missing_iea_yields_valid_transaction_blocks(self, missing_iea_bytes):
+        """ST-SE blocks must be yielded as valid TransactionBlocks even without IEA."""
         content = normalize_file_content(missing_iea_bytes)
         d = detect_delimiters(content)
-        # Should complete without raising
-        blocks = list(stream_transactions(content, d, allow_truncated=True))
-        # The ST-SE blocks that exist must still be yielded
-        assert len(blocks) >= 1
-
-    def test_missing_iea_lenient_yields_transactions(self, missing_iea_bytes):
-        """Claims inside ST-SE blocks must be returned even without IEA."""
-        content = normalize_file_content(missing_iea_bytes)
-        d = detect_delimiters(content)
-        blocks = list(stream_transactions(content, d, allow_truncated=True))
+        blocks = list(stream_transactions(content, d))
         assert all(isinstance(b, TransactionBlock) for b in blocks)
         assert all(len(b.segments) > 0 for b in blocks)
 
-    def test_missing_iea_strict_still_raises(self, missing_iea_bytes):
-        """Default (strict) mode must still raise TruncatedFileError."""
-        content = normalize_file_content(missing_iea_bytes)
-        d = detect_delimiters(content)
-        with pytest.raises(TruncatedFileError):
-            list(stream_transactions(content, d, allow_truncated=False))
-
-    def test_valid_file_lenient_mode_unchanged(self, valid_single_bytes):
-        """allow_truncated=True on a complete file must behave identically to strict."""
+    def test_complete_file_still_streams_normally(self, valid_single_bytes):
+        """A file with a proper IEA must stream identically to before."""
         content = normalize_file_content(valid_single_bytes)
         d = detect_delimiters(content)
-        strict_blocks  = list(stream_transactions(content, d, allow_truncated=False))
-        lenient_blocks = list(stream_transactions(content, d, allow_truncated=True))
-        assert len(strict_blocks) == len(lenient_blocks)
-        assert [b.st_control_number for b in strict_blocks] == [
-            b.st_control_number for b in lenient_blocks
-        ]
+        blocks = list(stream_transactions(content, d))
+        assert len(blocks) == 1
+        assert blocks[0].st_control_number != ""
