@@ -291,6 +291,81 @@ class TestInsertNewColumns:
 
 
 # ---------------------------------------------------------------------------
+# B3 — DOS fallback handles range-format service-line dates
+# ---------------------------------------------------------------------------
+
+class TestDOSRangeFallback:
+    """B3 — When all service lines have range dates ("YYYY-MM-DD to YYYY-MM-DD"),
+    dos_from and dos_to must still be extracted from those ranges."""
+
+    def _canonical_with_line_dates(self, *dates: str) -> "CanonicalClaim":
+        """Build a canonical claim whose service lines use the given date strings."""
+        from parser.models import Subscriber
+        canonical = _make_canonical()
+        canonical.claim.service_date_from = ""
+        canonical.claim.service_date_to   = ""
+        canonical.claim.service_lines = [
+            ServiceLine(line_number=i + 1, charge=Decimal("100"), date=d)
+            for i, d in enumerate(dates)
+        ]
+        canonical.claim.subscriber = Subscriber(member_id="M001")
+        return canonical
+
+    def test_single_range_date_extracts_bounds(self):
+        conn, cur = _mock_conn(fetchone_return=(1,))
+        repo = ClaimRepository(conn)
+        canonical = self._canonical_with_line_dates("2024-01-01 to 2024-01-05")
+        repo.insert_claim(canonical, _make_result(), "f.edi")
+        params = cur.execute.call_args[0][1]
+        # dos_from is at index 7, dos_to at index 8
+        assert params[7] == "2024-01-01"
+        assert params[8] == "2024-01-05"
+
+    def test_multiple_range_dates_picks_earliest_and_latest(self):
+        conn, cur = _mock_conn(fetchone_return=(2,))
+        repo = ClaimRepository(conn)
+        canonical = self._canonical_with_line_dates(
+            "2024-03-01 to 2024-03-05",
+            "2024-01-10 to 2024-01-15",
+        )
+        repo.insert_claim(canonical, _make_result(), "f.edi")
+        params = cur.execute.call_args[0][1]
+        assert params[7] == "2024-01-10"   # earliest start
+        assert params[8] == "2024-03-05"   # latest end
+
+    def test_mixed_single_and_range_dates(self):
+        conn, cur = _mock_conn(fetchone_return=(3,))
+        repo = ClaimRepository(conn)
+        canonical = self._canonical_with_line_dates(
+            "2024-06-01 to 2024-06-10",
+            "2024-05-20",               # single date
+        )
+        repo.insert_claim(canonical, _make_result(), "f.edi")
+        params = cur.execute.call_args[0][1]
+        assert params[7] == "2024-05-20"   # earliest overall
+        assert params[8] == "2024-06-10"   # latest overall
+
+    def test_all_single_dates_still_work(self):
+        """Regression: existing single-date logic must not regress."""
+        conn, cur = _mock_conn(fetchone_return=(4,))
+        repo = ClaimRepository(conn)
+        canonical = self._canonical_with_line_dates("2024-02-01", "2024-02-15")
+        repo.insert_claim(canonical, _make_result(), "f.edi")
+        params = cur.execute.call_args[0][1]
+        assert params[7] == "2024-02-01"
+        assert params[8] == "2024-02-15"
+
+    def test_no_dates_produces_none(self):
+        conn, cur = _mock_conn(fetchone_return=(5,))
+        repo = ClaimRepository(conn)
+        canonical = self._canonical_with_line_dates("")   # empty date
+        repo.insert_claim(canonical, _make_result(), "f.edi")
+        params = cur.execute.call_args[0][1]
+        assert params[7] is None
+        assert params[8] is None
+
+
+# ---------------------------------------------------------------------------
 # get_stats
 # ---------------------------------------------------------------------------
 

@@ -557,10 +557,14 @@ class EDI837PStateMachine:
             ),
         )
 
-        # Attach buffered patient
+        # Attach buffered patient.
+        # Do NOT clear _pending_patient here — the 837P spec allows multiple CLM
+        # segments within the same HL*23 (patient) scope.  Clearing it here would
+        # cause the second and subsequent CLMs in the same scope to lose patient
+        # data.  _pending_patient is reset by the HL dispatcher when a new HL*22
+        # or HL*23 is encountered.
         if self._pending_patient is not None:
             claim.patient = self._pending_patient
-            self._pending_patient = None
 
         self._current_claim = claim
         self._active_provider = None   # reset; 2310 providers arrive after CLM
@@ -601,10 +605,19 @@ class EDI837PStateMachine:
             self._subscriber.city    = data.get("city", "")
             self._subscriber.state   = data.get("state", "")
             self._subscriber.zip_code = data.get("zip_code", "")
-        elif self._loop == Loop.L2010CA and self._current_claim and self._current_claim.patient:
-            self._current_claim.patient.city    = data.get("city", "")
-            self._current_claim.patient.state   = data.get("state", "")
-            self._current_claim.patient.zip_code = data.get("zip_code", "")
+        elif self._loop == Loop.L2010CA:
+            # Mirror the same fallback logic as _apply_n3: prefer the claim's
+            # patient if already attached, otherwise write to _pending_patient so
+            # the data survives until CLM is parsed.
+            target = (
+                self._current_claim.patient
+                if self._current_claim and self._current_claim.patient
+                else self._pending_patient
+            )
+            if target:
+                target.city    = data.get("city", "")
+                target.state   = data.get("state", "")
+                target.zip_code = data.get("zip_code", "")
         elif self._active_provider is not None:
             self._active_provider.city    = data.get("city", "")
             self._active_provider.state   = data.get("state", "")

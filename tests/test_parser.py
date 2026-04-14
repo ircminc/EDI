@@ -828,3 +828,133 @@ class TestBatch4Features:
 
     def test_billing_npi_present(self):
         assert self._c.billing_provider.npi == "1234567890"
+
+
+# ---------------------------------------------------------------------------
+# Bug-fix regression tests (B1 / B2)
+# ---------------------------------------------------------------------------
+
+# Minimal segment sequence helper — builds the full HL hierarchy so we can
+# test specific segments in isolation without needing a fixture file.
+
+_BILLING_CTX = [
+    "ST*837*0001",
+    "BHT*0019*00*BHTID*20240101*1200*CH",
+    "NM1*41*2*SUBMITTER*****46*SUBID",
+    "HL*1**20*1",
+    "NM1*85*2*BILLING HOSPITAL*****XX*1234567890",
+    "N3*100 BILLING AVE",
+    "N4*MEDCITY*TX*75001",
+    "REF*EI*123456789",
+    "HL*2*1*22*1",
+    "SBR*P**GRP001",
+    "NM1*IL*1*SMITH*JOHN*A***MI*12345",
+    "NM1*PR*2*BLUECROSS*****PI*BCBS01",
+]
+
+_CLAIM_SEG = [
+    "CLM*CLM001*150***11:B:1*Y*A*Y*I",
+    "HI*BK:J06.9",
+    "LX*1",
+    "SV1*HC:99213*150*UN*1***1",
+    "DTP*472*D8*20240101",
+    "SE*15*0001",
+]
+
+
+def _run_sm(segments: list[str]) -> list[CanonicalClaim]:
+    """Run the state machine directly on a segment list (no file I/O)."""
+    fe = FileEnvelope(file_name="test.edi")
+    te = TransactionEnvelope(st_control_number="0001")
+    sm = EDI837PStateMachine(fe, te, "*", ":")
+    return sm.parse(segments)
+
+
+class TestBugB1PatientN4Fallback:
+    """B1 — _apply_n4() must capture patient city/state/zip even when N4
+    arrives before the CLM segment (i.e. _current_claim is None)."""
+
+    def _segments(self) -> list[str]:
+        return _BILLING_CTX + [
+            "HL*3*2*23*0",
+            "NM1*QC*1*DOE*JANE*M***MI*67890",
+            "N3*456 PATIENT ST",
+            "N4*PATIENTCITY*TX*78002",    # arrives BEFORE CLM
+        ] + _CLAIM_SEG
+
+    def test_patient_city_captured(self):
+        claims = _run_sm(self._segments())
+        assert len(claims) == 1
+        patient = claims[0].claim.patient
+        assert patient is not None
+        assert patient.city == "PATIENTCITY"
+
+    def test_patient_state_captured(self):
+        claims = _run_sm(self._segments())
+        patient = claims[0].claim.patient
+        assert patient.state == "TX"
+
+    def test_patient_zip_captured(self):
+        claims = _run_sm(self._segments())
+        patient = claims[0].claim.patient
+        assert patient.zip_code == "78002"
+
+    def test_patient_address1_still_captured(self):
+        """N3 (address) fallback was already present — ensure it still works."""
+        claims = _run_sm(self._segments())
+        patient = claims[0].claim.patient
+        assert patient.address1 == "456 PATIENT ST"
+
+    def test_patient_name_still_correct(self):
+        claims = _run_sm(self._segments())
+        patient = claims[0].claim.patient
+        assert patient.last_name == "DOE"
+        assert patient.first_name == "JANE"
+
+
+class TestBugB2MultipleClmsSamePatient:
+    """B2 — _pending_patient must NOT be cleared after the first CLM.
+    A second CLM in the same HL*23 scope must also receive patient data."""
+
+    def _segments(self) -> list[str]:
+        return _BILLING_CTX + [
+            "HL*3*2*23*0",
+            "NM1*QC*1*JONES*MARY*K***MI*99999",
+            "DMG*D8*19800315*F",
+        ] + [
+            "CLM*CLM001*150***11:B:1*Y*A*Y*I",
+            "HI*BK:J06.9",
+            "LX*1",
+            "SV1*HC:99213*150*UN*1***1",
+            "DTP*472*D8*20240101",
+            # second claim — same HL*23 scope, no new HL segment
+            "CLM*CLM002*200***11:B:1*Y*A*Y*I",
+            "HI*BK:J18.9",
+            "LX*1",
+            "SV1*HC:99214*200*UN*1***1",
+            "DTP*472*D8*20240102",
+            "SE*20*0001",
+        ]
+
+    def test_two_claims_produced(self):
+        claims = _run_sm(self._segments())
+        assert len(claims) == 2
+
+    def test_first_claim_has_patient(self):
+        claims = _run_sm(self._segments())
+        assert claims[0].claim.patient is not None
+        assert claims[0].claim.patient.last_name == "JONES"
+
+    def test_second_claim_has_patient(self):
+        """This was the bug: second CLM got no patient after the fix."""
+        claims = _run_sm(self._segments())
+        assert claims[1].claim.patient is not None
+        assert claims[1].claim.patient.last_name == "JONES"
+
+    def test_second_claim_patient_dob(self):
+        claims = _run_sm(self._segments())
+        assert claims[1].claim.patient.dob == "1980-03-15"
+
+    def test_second_claim_patient_gender(self):
+        claims = _run_sm(self._segments())
+        assert claims[1].claim.patient.gender == "F"

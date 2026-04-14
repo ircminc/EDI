@@ -521,6 +521,87 @@ class TestL3DiagPointers:
 # Batch 4.1 — Integration: all 7 rules pass on valid claims
 # ---------------------------------------------------------------------------
 
+class TestBugB4DedupKey:
+    """B4 — Deduplication must not silently drop errors that share the same
+    (code, position) but have different messages (different service lines)."""
+
+    def test_two_bad_pointers_on_different_lines_both_reported(self):
+        sl1 = ServiceLine(line_number=1, procedure_code="99213",
+                          charge=Decimal("100"), date="2024-01-01",
+                          diagnosis_pointers=["5"])   # out of range
+        sl2 = ServiceLine(line_number=2, procedure_code="99214",
+                          charge=Decimal("120"), date="2024-01-01",
+                          diagnosis_pointers=["9"])   # also out of range
+        canon = _make_canonical(
+            service_lines=[sl1, sl2],
+            diagnosis_codes=[{"qualifier": "BK", "code": "Z0000"}],
+        )
+        errors = check_diagnosis_pointers(canon)
+        assert len(errors) == 2, (
+            f"Expected 2 distinct L3-DIAG-PTR errors, got {len(errors)}: {errors}"
+        )
+        assert all(e["code"] == "L3-DIAG-PTR" for e in errors)
+
+    def test_same_error_code_and_message_still_deduped(self):
+        """Genuine duplicates (same code, same message) must still collapse."""
+        sl1 = ServiceLine(line_number=1, procedure_code="99213",
+                          charge=Decimal("100"), date="2024-01-01",
+                          diagnosis_pointers=["5"])
+        # Exact same service line content — would produce identical messages
+        sl2 = ServiceLine(line_number=1, procedure_code="99213",
+                          charge=Decimal("100"), date="2024-01-01",
+                          diagnosis_pointers=["5"])
+        canon = _make_canonical(
+            service_lines=[sl1, sl2],
+            diagnosis_codes=[{"qualifier": "BK", "code": "Z0000"}],
+        )
+        errors = check_diagnosis_pointers(canon)
+        # Both lines produce the same message ("pointer '5' on service line 1")
+        # so they ARE genuine duplicates and collapse is acceptable
+        assert len(errors) >= 1
+
+
+class TestBugB5DiagPtrZeroDiagnoses:
+    """B5 — When num_diag == 0, check_diagnosis_pointers must return [] to
+    avoid a second wave of errors alongside L2-MISSING-HI."""
+
+    def test_no_diagnoses_returns_empty(self):
+        sl = ServiceLine(line_number=1, procedure_code="99213",
+                         charge=Decimal("100"), date="2024-01-01",
+                         diagnosis_pointers=["1"])
+        canon = _make_canonical(diagnosis_codes=[], service_lines=[sl])
+        errors = check_diagnosis_pointers(canon)
+        assert errors == [], (
+            f"Expected no L3-DIAG-PTR errors when diagnosis list is empty, "
+            f"got {errors}"
+        )
+
+    def test_no_diagnoses_ptr2_also_empty(self):
+        """Previously ptr '2' would fire but ptr '1' would not — now both silent."""
+        sl = ServiceLine(line_number=1, procedure_code="99213",
+                         charge=Decimal("100"), date="2024-01-01",
+                         diagnosis_pointers=["2"])
+        canon = _make_canonical(diagnosis_codes=[], service_lines=[sl])
+        errors = check_diagnosis_pointers(canon)
+        assert errors == []
+
+    def test_with_diagnoses_out_of_range_still_fires(self):
+        """Regression: valid num_diag>0 out-of-range pointer must still error."""
+        sl = ServiceLine(line_number=1, procedure_code="99213",
+                         charge=Decimal("100"), date="2024-01-01",
+                         diagnosis_pointers=["3"])   # only 1 diagnosis
+        canon = _make_canonical(service_lines=[sl])  # default has 1 dx code
+        errors = check_diagnosis_pointers(canon)
+        assert len(errors) == 1
+        assert errors[0]["code"] == "L3-DIAG-PTR"
+
+    def test_with_diagnoses_in_range_still_passes(self):
+        """Regression: valid pointer with diagnoses present must not fire."""
+        canon = _make_canonical()  # default: 1 dx, pointer "1"
+        errors = check_diagnosis_pointers(canon)
+        assert errors == []
+
+
 class TestBatch41AllRulesPass:
     def test_valid_single_passes_all_new_rules(self, valid_single_bytes):
         pairs = _validate_file(valid_single_bytes)

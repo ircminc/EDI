@@ -81,13 +81,31 @@ class ClaimRepository:
         dos_from = _iso_or_none(c.service_date_from)
         dos_to   = _iso_or_none(c.service_date_to)
         if not dos_from:
-            line_dates = sorted(
-                sl.date for sl in c.service_lines
-                if sl.date and not " to " in sl.date and len(sl.date) == 10
-            )
-            if line_dates:
-                dos_from = line_dates[0]
-                dos_to   = line_dates[-1]
+            # Collect the earliest start-date and latest end-date across all
+            # service lines.  Range dates ("YYYY-MM-DD to YYYY-MM-DD") are
+            # handled by splitting on " to "; single dates are their own range.
+            starts: list[str] = []
+            ends:   list[str] = []
+            for sl in c.service_lines:
+                d = (sl.date or "").strip()
+                if not d:
+                    continue
+                if " to " in d:
+                    parts = d.split(" to ", 1)
+                    s = _iso_or_none(parts[0].strip())
+                    e = _iso_or_none(parts[1].strip())
+                    if s:
+                        starts.append(s)
+                    if e:
+                        ends.append(e)
+                else:
+                    iso = _iso_or_none(d)
+                    if iso:
+                        starts.append(iso)
+                        ends.append(iso)
+            if starts:
+                dos_from = sorted(starts)[0]
+                dos_to   = sorted(ends)[-1]
 
         rendering_npi = (
             c.rendering_provider.npi if c.rendering_provider else ""

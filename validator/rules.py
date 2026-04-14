@@ -322,12 +322,18 @@ def check_diagnosis_pointers(claim: CanonicalClaim) -> list[dict[str, Any]]:
     c = claim.claim
     num_diag = len(c.diagnosis_codes)
 
+    if num_diag == 0:
+        # L2-MISSING-HI already fires when there are no diagnosis codes;
+        # skip pointer validation entirely to avoid a second wave of errors
+        # for the same root cause.
+        return errors
+
     for sl in c.service_lines:
         for ptr in sl.diagnosis_pointers:
             if not ptr.isdigit():
                 continue
             idx = int(ptr)
-            if idx < 1 or idx > max(num_diag, 1):
+            if idx < 1 or idx > num_diag:
                 errors.append(_err(
                     level=3, severity="error",
                     code="L3-DIAG-PTR",

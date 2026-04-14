@@ -165,11 +165,13 @@ class SNIPValidator:
         for e in check_diagnosis_pointers(claim):
             findings.append(_to_ve(e))
 
-        # Deduplicate by code + position
+        # Deduplicate by code + position + message so that the same rule firing
+        # on two different service lines (both using position=-1) produces two
+        # distinct findings rather than silently suppressing the second one.
         seen: set[tuple] = set()
         unique: list[ValidationError] = []
         for f in findings:
-            key = (f.code, f.position, f.claim_id)
+            key = (f.code, f.position, f.claim_id, f.message)
             if key not in seen:
                 seen.add(key)
                 unique.append(f)
