@@ -327,3 +327,37 @@ class ClaimRepository:
         with self._conn.cursor() as cur:
             cur.execute(sql, (file_name,))
             return cur.rowcount
+
+    def find_duplicate_claim_ids(self, claim_ids: list[str]) -> set[str]:
+        """
+        Return the subset of *claim_ids* that already exist in edi_claims.
+
+        Uses ``WHERE claim_id = ANY(%s)`` with psycopg2's native list-to-array
+        adaptation so no dynamic SQL is needed.
+
+        Parameters
+        ----------
+        claim_ids:
+            List of CLM01 values extracted from the current batch.  May contain
+            duplicates within the list itself — psycopg2/Postgres deduplicate on
+            the DB side automatically.
+
+        Returns
+        -------
+        set[str]
+            Claim IDs from the input that are already stored.  Empty set when
+            *claim_ids* is empty or none match.
+
+        Note
+        ----
+        For very large batches (thousands of IDs) consider chunking the list to
+        avoid an oversized array literal.  Typical EDI files have tens to low
+        hundreds of claims, so chunking is not needed for current scale.
+        """
+        if not claim_ids:
+            return set()
+
+        sql = "SELECT claim_id FROM edi_claims WHERE claim_id = ANY(%s)"
+        with self._conn.cursor() as cur:
+            cur.execute(sql, (claim_ids,))
+            return {row[0] for row in cur.fetchall()}

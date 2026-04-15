@@ -11,11 +11,14 @@ Features:
 
 from __future__ import annotations
 
+import csv
 import hashlib
+import io
 import json
 import os
 import sys
 import time
+from collections import Counter, defaultdict
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -30,6 +33,8 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from utils.dates import service_date_display
+from utils.claim_display import patient_name as _display_patient_name, dos as _display_dos
+from ui.export import build_csv, build_excel
 from ingestion.normalizer import normalize_file_content
 from ingestion.detector import detect_delimiters
 from ingestion.streamer import stream_transactions
@@ -242,6 +247,7 @@ with _log_tab:
                 + (f' &nbsp;·&nbsp; ⚠️ envelope' if _entry.get("env_warning") else "")
                 + (f' &nbsp;·&nbsp; {_entry["parse_warnings"]} parse warn' if _entry.get("parse_warnings") else "")
                 + (f' &nbsp;·&nbsp; 💾 {_entry["db_persisted"]}' if _entry.get("db_persisted") else "")
+                + (f' &nbsp;·&nbsp; 🔁 {_entry["duplicate_count"]} dup' if _entry.get("duplicate_count") else "")
                 + (f'<br><span style="color:#f87171">{_entry["error"]}</span>' if _entry.get("error") else "")
                 + (f'<br><span style="color:#fcd34d">DB: {_entry["db_error"]}</span>' if _entry.get("db_error") else "")
                 + f'</span></div>',
@@ -287,6 +293,8 @@ class _PipelineDiag:
     """Non-empty if a TruncatedFileError was caught during streaming."""
     parse_warnings: list = _dc.field(default_factory=list)
     """Per-transaction parse warnings collected during processing."""
+    duplicate_ids: set = _dc.field(default_factory=set)
+    """Claim IDs from this file that already existed in the DB before insert."""
 
 
 def process_file(
@@ -396,6 +404,7 @@ if uploaded_files and _process_clicked:
             "parse_warnings": 0,
             "db_persisted": None,
             "db_error": None,
+            "duplicate_count": 0,
         }
         raw = _uploaded.read()
         try:
@@ -414,6 +423,10 @@ if uploaded_files and _process_clicked:
                     with managed_connection() as conn:
                         apply_schema(conn)
                         repo = ClaimRepository(conn)
+                        # Check for duplicates BEFORE inserting
+                        _all_ids = [c.claim.claim_id for c, _ in pairs]
+                        _diag.duplicate_ids = repo.find_duplicate_claim_ids(_all_ids)
+                        _log_entry["duplicate_count"] = len(_diag.duplicate_ids)
                         ids = repo.insert_many(pairs, file_name=_fname)
                     _log_entry["db_persisted"] = len(ids)
                 except Exception as db_err:
@@ -434,29 +447,13 @@ if uploaded_files and _process_clicked:
 # ---------------------------------------------------------------------------
 
 def _patient_name(canonical: CanonicalClaim) -> str:
-    """Last, First [Middle] — falls back to subscriber; '-' if unavailable."""
-    p = canonical.claim.patient
-    s = canonical.claim.subscriber
-
-    def _fmt(last: str, first: str, middle: str) -> str:
-        last  = last.strip().title()
-        first = first.strip().title()
-        mid   = middle.strip().title()
-        name  = f"{last}, {first}".strip(", ").strip()
-        return f"{name} {mid}".strip() if mid else name or "-"
-
-    if p and (p.last_name or p.first_name):
-        return _fmt(p.last_name, p.first_name, p.middle_name)
-    if s.last_name or s.first_name:
-        return _fmt(s.last_name, s.first_name, s.middle_name)
-    return "-"
+    """Delegate to utils.claim_display.patient_name."""
+    return _display_patient_name(canonical)
 
 
 def _dos(canonical: CanonicalClaim) -> str:
-    """Human-readable Date of Service via utils.dates.service_date_display."""
-    c = canonical.claim
-    line_dates = [sl.date for sl in c.service_lines if sl.date]
-    return service_date_display(c.service_date_from, c.service_date_to, line_dates)
+    """Delegate to utils.claim_display.dos."""
+    return _display_dos(canonical)
 
 
 def _mono(val: str) -> str:
@@ -870,74 +867,170 @@ if results:
     )
     # ── End metrics bar ──────────────────────────────────────────────────────
 
-    st.markdown(f"### Results — {len(filtered)} claim(s)")
+    # ── Collect duplicate IDs across all processed files ────────────────────
+    _all_duplicate_ids: set[str] = set()
+    for _fd in st.session_state.get("file_diags", {}).values():
+        _all_duplicate_ids |= getattr(_fd, "duplicate_ids", set())
 
-    # ClaimID | NPI | PatientName | DateOfService | Charge | Status | Errors | Toggle
-    COL_W = [1.5, 1.3, 2.0, 2.0, 1.2, 0.85, 1.4, 0.55]
+    # ── Main tabs: Results grid | Analytics dashboard ────────────────────────
+    _results_tab, _analytics_tab = st.tabs(["📋 Results", "📊 Analytics"])
 
-    # ---- Header ----
-    hdr = st.columns(COL_W)
-    _HDR = "font-size:0.78rem;font-weight:700;text-transform:uppercase;letter-spacing:0.06em;color:#9ca3af"
-    for col, label in zip(hdr, [
-        "Claim ID", "Billing NPI", "Patient Name",
-        "Date of Service", "Total Charge", "Status", "Errors", "",
-    ]):
-        col.markdown(f'<span style="{_HDR}">{label}</span>', unsafe_allow_html=True)
+    # ════════════════════════════════════════════════════════════════════════
+    # TAB — Results grid
+    # ════════════════════════════════════════════════════════════════════════
+    with _results_tab:
+        # Export buttons
+        _exp_c1, _exp_c2, _exp_spacer = st.columns([1, 1.1, 5])
+        with _exp_c1:
+            st.download_button(
+                "⬇ CSV",
+                data=build_csv(filtered),
+                file_name="claims_export.csv",
+                mime="text/csv",
+                key="dl_csv",
+                use_container_width=True,
+            )
+        with _exp_c2:
+            st.download_button(
+                "⬇ Excel",
+                data=build_excel(filtered),
+                file_name="claims_export.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="dl_xlsx",
+                use_container_width=True,
+            )
 
-    st.markdown(
-        '<hr style="margin:4px 0 8px 0;border:none;border-top:1px solid rgba(255,255,255,0.1)">',
-        unsafe_allow_html=True,
-    )
+        st.markdown(f"##### {len(filtered)} claim(s)")
 
-    # ---- Rows ----
-    for idx, (canonical, result) in enumerate(filtered):
-        c   = canonical.claim
-        row = st.columns(COL_W)
+        # ClaimID | NPI | PatientName | DateOfService | Charge | Status | Errors | Toggle
+        COL_W = [1.5, 1.3, 2.0, 2.0, 1.2, 0.85, 1.4, 0.55]
 
-        row[0].markdown(_mono(c.claim_id or "—"), unsafe_allow_html=True)
-        row[1].markdown(_mono(c.billing_provider.npi or "—"), unsafe_allow_html=True)
-        row[2].markdown(
-            f'<span style="font-size:0.9rem">{_patient_name(canonical)}</span>',
-            unsafe_allow_html=True,
-        )
-        row[3].markdown(
-            f'<span style="font-size:0.88rem;white-space:nowrap">{_dos(canonical)}</span>',
-            unsafe_allow_html=True,
-        )
-        row[4].markdown(
-            f'<span style="font-size:0.9rem;font-variant-numeric:tabular-nums">'
-            f'${c.total_charge:,.2f}</span>',
-            unsafe_allow_html=True,
-        )
-        row[5].markdown(_status_badge(result.status), unsafe_allow_html=True)
-        row[6].markdown(_error_pills(result.errors), unsafe_allow_html=True)
-
-        # Toggle button — ▶ closed / ▼ open
-        is_open = st.session_state.get("selected_row") == idx
-        if row[7].button("▼" if is_open else "▶", key=f"toggle_{idx}",
-                         help="Open / close claim detail"):
-            st.session_state.selected_row = None if is_open else idx
-
-        # ---- Inline detail panel (directly below this row) ----
-        if st.session_state.get("selected_row") == idx:
-            with st.container():
-                st.markdown(
-                    '<div style="background:rgba(255,255,255,0.03);border:1px solid '
-                    'rgba(255,255,255,0.1);border-radius:8px;padding:12px 16px;margin:6px 0 10px 0">',
-                    unsafe_allow_html=True,
-                )
-                st.markdown(
-                    f'<p style="font-size:0.8rem;color:#9ca3af;margin:0 0 8px 0">'
-                    f'Claim Detail — <code>{c.claim_id}</code></p>',
-                    unsafe_allow_html=True,
-                )
-                _render_detail(canonical, result)
-                st.markdown("</div>", unsafe_allow_html=True)
+        # ---- Header ----
+        hdr = st.columns(COL_W)
+        _HDR = "font-size:0.78rem;font-weight:700;text-transform:uppercase;letter-spacing:0.06em;color:#9ca3af"
+        for col, label in zip(hdr, [
+            "Claim ID", "Billing NPI", "Patient Name",
+            "Date of Service", "Total Charge", "Status", "Errors", "",
+        ]):
+            col.markdown(f'<span style="{_HDR}">{label}</span>', unsafe_allow_html=True)
 
         st.markdown(
-            '<hr style="margin:2px 0;border:none;border-top:1px solid rgba(255,255,255,0.05)">',
+            '<hr style="margin:4px 0 8px 0;border:none;border-top:1px solid rgba(255,255,255,0.1)">',
             unsafe_allow_html=True,
         )
+
+        # ---- Rows ----
+        for idx, (canonical, result) in enumerate(filtered):
+            c   = canonical.claim
+            row = st.columns(COL_W)
+
+            # Duplicate badge — shown when this claim_id was already in the DB
+            _dup_badge = (
+                ' <span title="Already exists in DB" style="font-size:0.75rem">🔁</span>'
+                if c.claim_id in _all_duplicate_ids else ""
+            )
+            row[0].markdown(_mono(c.claim_id or "—") + _dup_badge, unsafe_allow_html=True)
+            row[1].markdown(_mono(c.billing_provider.npi or "—"), unsafe_allow_html=True)
+            row[2].markdown(
+                f'<span style="font-size:0.9rem">{_patient_name(canonical)}</span>',
+                unsafe_allow_html=True,
+            )
+            row[3].markdown(
+                f'<span style="font-size:0.88rem;white-space:nowrap">{_dos(canonical)}</span>',
+                unsafe_allow_html=True,
+            )
+            row[4].markdown(
+                f'<span style="font-size:0.9rem;font-variant-numeric:tabular-nums">'
+                f'${c.total_charge:,.2f}</span>',
+                unsafe_allow_html=True,
+            )
+            row[5].markdown(_status_badge(result.status), unsafe_allow_html=True)
+            row[6].markdown(_error_pills(result.errors), unsafe_allow_html=True)
+
+            # Toggle button — ▶ closed / ▼ open
+            is_open = st.session_state.get("selected_row") == idx
+            if row[7].button("▼" if is_open else "▶", key=f"toggle_{idx}",
+                             help="Open / close claim detail"):
+                st.session_state.selected_row = None if is_open else idx
+
+            # ---- Inline detail panel (directly below this row) ----
+            if st.session_state.get("selected_row") == idx:
+                with st.container():
+                    st.markdown(
+                        '<div style="background:rgba(255,255,255,0.03);border:1px solid '
+                        'rgba(255,255,255,0.1);border-radius:8px;padding:12px 16px;margin:6px 0 10px 0">',
+                        unsafe_allow_html=True,
+                    )
+                    st.markdown(
+                        f'<p style="font-size:0.8rem;color:#9ca3af;margin:0 0 8px 0">'
+                        f'Claim Detail — <code>{c.claim_id}</code></p>',
+                        unsafe_allow_html=True,
+                    )
+                    _render_detail(canonical, result)
+                    st.markdown("</div>", unsafe_allow_html=True)
+
+            st.markdown(
+                '<hr style="margin:2px 0;border:none;border-top:1px solid rgba(255,255,255,0.05)">',
+                unsafe_allow_html=True,
+            )
+
+    # ════════════════════════════════════════════════════════════════════════
+    # TAB — Analytics dashboard
+    # ════════════════════════════════════════════════════════════════════════
+    with _analytics_tab:
+
+        # ── Rejection Breakdown ──────────────────────────────────────────────
+        _err_counter = Counter(
+            e.code
+            for _, r in filtered
+            for e in r.errors
+            if e.severity == "error"
+        )
+        st.markdown("#### 🔴 Rejection Breakdown — Top 10 Error Codes")
+        if _err_counter:
+            _top10 = dict(_err_counter.most_common(10))
+            st.bar_chart({"Errors": _top10}, horizontal=True, color="#f87171")
+        else:
+            st.success("No errors in the current result set — all claims passed.")
+
+        st.markdown("---")
+
+        # ── Charges by Payer ─────────────────────────────────────────────────
+        st.markdown("#### 💰 Charges by Payer")
+        _payer_charges: dict[str, float] = defaultdict(float)
+        for _can, _ in filtered:
+            _payer = _can.claim.subscriber.payer_name.strip() or "Unknown"
+            _payer_charges[_payer] += float(_can.claim.total_charge)
+        if _payer_charges:
+            st.bar_chart({"Total Charge ($)": dict(_payer_charges)}, color="#60a5fa")
+        else:
+            st.info("No payer data available.")
+
+        st.markdown("---")
+
+        # ── SNIP Level Breakdown ─────────────────────────────────────────────
+        st.markdown("#### 📐 Errors by SNIP Level")
+        _level_counts: dict[str, int] = Counter(
+            f"L{e.level}"
+            for _, r in filtered
+            for e in r.errors
+        )
+        if _level_counts:
+            st.bar_chart({"Error Count": dict(sorted(_level_counts.items()))}, color="#a78bfa")
+        else:
+            st.info("No validation errors detected.")
+
+        st.markdown("---")
+
+        # ── Claims by File ───────────────────────────────────────────────────
+        _file_counts: dict[str, int] = {}
+        for _can, _ in filtered:
+            _fn = _can.file.file_name if _can.file else "Unknown"
+            _file_counts[_fn] = _file_counts.get(_fn, 0) + 1
+        if len(_file_counts) > 1:
+            st.markdown("#### 📁 Claims by File")
+            st.bar_chart({"Claim Count": _file_counts}, color="#34d399")
+            st.markdown("---")
 
 # ---------------------------------------------------------------------------
 # DB search tab (separate from file results)

@@ -467,3 +467,77 @@ class TestDeleteByFile:
         repo = ClaimRepository(conn)
         repo.delete_by_file("x.edi")
         assert cur.execute.call_count == 1
+
+
+# ---------------------------------------------------------------------------
+# find_duplicate_claim_ids
+# ---------------------------------------------------------------------------
+
+class TestFindDuplicateClaimIds:
+    def _mock_dup_conn(self, fetchall_return):
+        conn = MagicMock()
+        cur = MagicMock()
+        cur.__enter__ = MagicMock(return_value=cur)
+        cur.__exit__ = MagicMock(return_value=False)
+        cur.fetchall.return_value = fetchall_return
+        conn.cursor.return_value = cur
+        return conn, cur
+
+    def test_returns_empty_set_when_no_input(self):
+        """Empty input → empty set without touching the DB."""
+        conn, cur = self._mock_dup_conn([])
+        repo = ClaimRepository(conn)
+        result = repo.find_duplicate_claim_ids([])
+        assert result == set()
+
+    def test_no_db_call_when_empty_input(self):
+        """execute() must NOT be called for an empty list."""
+        conn, cur = self._mock_dup_conn([])
+        repo = ClaimRepository(conn)
+        repo.find_duplicate_claim_ids([])
+        cur.execute.assert_not_called()
+
+    def test_returns_empty_set_when_no_matches(self):
+        """DB returns zero rows → empty set."""
+        conn, cur = self._mock_dup_conn([])
+        repo = ClaimRepository(conn)
+        result = repo.find_duplicate_claim_ids(["CLM999"])
+        assert result == set()
+
+    def test_returns_matching_ids(self):
+        """DB returns two rows → both IDs in the result set."""
+        conn, cur = self._mock_dup_conn([("CLM001",), ("CLM002",)])
+        repo = ClaimRepository(conn)
+        result = repo.find_duplicate_claim_ids(["CLM001", "CLM002", "CLM003"])
+        assert result == {"CLM001", "CLM002"}
+
+    def test_partial_match(self):
+        """Input has 3 IDs, DB matches only 1 → set with that 1 ID."""
+        conn, cur = self._mock_dup_conn([("CLM007",)])
+        repo = ClaimRepository(conn)
+        result = repo.find_duplicate_claim_ids(["CLM005", "CLM006", "CLM007"])
+        assert result == {"CLM007"}
+
+    def test_return_type_is_set(self):
+        """Return value must always be a set, not a list."""
+        conn, cur = self._mock_dup_conn([("CLM001",)])
+        repo = ClaimRepository(conn)
+        result = repo.find_duplicate_claim_ids(["CLM001"])
+        assert isinstance(result, set)
+
+    def test_sql_uses_any_operator(self):
+        """Query must use the ANY(%s) pattern for safety and efficiency."""
+        conn, cur = self._mock_dup_conn([])
+        repo = ClaimRepository(conn)
+        repo.find_duplicate_claim_ids(["CLM001"])
+        sql = cur.execute.call_args[0][0]
+        assert "ANY" in sql.upper()
+        assert "claim_id" in sql
+
+    def test_duplicate_input_ids_handled(self):
+        """Duplicate claim IDs in the input list must not cause errors."""
+        conn, cur = self._mock_dup_conn([("CLM001",)])
+        repo = ClaimRepository(conn)
+        # Same ID passed twice — DB returns it once; result should be {CLM001}
+        result = repo.find_duplicate_claim_ids(["CLM001", "CLM001"])
+        assert result == {"CLM001"}
