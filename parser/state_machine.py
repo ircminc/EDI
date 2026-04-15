@@ -374,6 +374,17 @@ class EDI837PStateMachine:
                 self._current_claim.amounts[qualifier] = amount
             self._record_raw(raw, pos, self._loop)
 
+        elif seg_id == "LQ":
+            # Loop 2310D — LOINC qualifier (DME/oxygen/wheelchair claims).
+            # Captured as a raw segment; no structured field extraction needed
+            # for core RCM processing.
+            self._record_raw(raw, pos, self._loop)
+
+        elif seg_id == "FRM":
+            # CMS Certificate of Medical Necessity (CMN) supporting-doc
+            # responses. Appears after LQ in DME claims. Captured as raw.
+            self._record_raw(raw, pos, self._loop)
+
         elif seg_id == "DTP":
             data      = map_dtp(els)
             qualifier = data["qualifier"]

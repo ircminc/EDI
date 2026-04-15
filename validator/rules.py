@@ -35,12 +35,28 @@ _ILLEGAL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 # Segments that are valid in an 837P transaction (non-exhaustive list of
 # standard segment IDs; unknown IDs trigger L1-INVALID-SEG)
 _VALID_SEGMENT_IDS = {
-    "ST", "BHT", "NM1", "PER", "HL", "PRV", "N3", "N4", "REF",
-    "SBR", "PAT", "DMG", "CLM", "DTP", "HI", "LX", "SV1", "SV2",
-    "SV3", "SV4", "SV5", "TOO", "CR1", "CR2", "CR3", "CR4", "CR5",
-    "CR6", "CR8", "CRC", "NTE", "AMT", "MOA", "PWK", "CN1", "DN1",
-    "DN2", "K3", "OI", "MIA", "MOA", "QTY", "HCP", "LIN", "CTP",
-    "CL1", "ACB", "MEA", "SE", "GS", "GE", "ISA", "IEA", "TA1",
+    # Envelope
+    "ISA", "IEA", "GS", "GE", "ST", "SE", "TA1",
+    # Header / functional
+    "BHT",
+    # Name & address loops (2000–2010, 2310, 2420)
+    "HL", "NM1", "PER", "N3", "N4", "PRV", "REF",
+    # Patient / subscriber
+    "SBR", "PAT", "DMG",
+    # Claim (2300)
+    "CLM", "DTP", "HI", "NTE", "AMT", "PWK", "CN1", "CR1", "CR2",
+    "CR3", "CR4", "CR5", "CR6", "CR8", "CRC", "K3", "OI",
+    "MOA", "MIA", "DN1", "DN2", "QTY", "HCP",
+    # Service lines (2400)
+    "LX", "SV1", "SV2", "SV3", "SV4", "SV5", "TOO",
+    # NDC / drug (2410)
+    "LIN", "CTP",
+    # Line adjudication (2430) — SVD/CAS parsed by state machine
+    "SVD", "CAS",
+    # DME-specific: LOINC qualifier (2310D) and CMS CMN responses
+    "LQ", "FRM",
+    # Other valid 837P segments
+    "CL1", "ACB", "MEA",
 }
 
 
